@@ -5,6 +5,7 @@ cross-fades)."""
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import subprocess
 import tempfile
@@ -64,10 +65,35 @@ def select(
     return chosen[:top] if len(chosen) > top else chosen
 
 
-def _render_batch(base_url: str, items, opts, progress: ProgressFn, results: dict, lock: threading.Lock) -> None:
+_REUSE_KEYS = {"width": 1280, "height": 720, "fps": 30, "pov": "first", "slowmo": False, "hud": True, "detail": "auto"}
+
+
+def _reusable(demo_id: str, h: dict[str, Any], badge: str, label: str, opts: dict[str, Any]) -> Path | None:
+    """An already rendered montage clip with the same settings (so an
+    interrupted montage resumes instead of starting over)."""
+    path = storage.clips_dir(demo_id) / f"{h['id']}-{opts.get('pov', 'first')}-montage.mp4"
+    try:
+        side = json.loads(path.with_suffix(".json").read_text())
+    except (OSError, ValueError):
+        return None
+    want = {k: opts.get(k, v) for k, v in _REUSE_KEYS.items()}
+    want.update(badge=badge, match=label)
+    if any(side.get(k) != v for k, v in want.items()):
+        return None
+    if side.get("sound") != bool(opts.get("sound", True)):
+        return None
+    return path
+
+
+def _render_worker(base_url: str, queue: list, opts, progress: ProgressFn, results: dict, lock: threading.Lock) -> None:
     from .recorder import render_highlights
 
-    for demo_id, h, badge, label in items:
+    while True:
+        with lock:
+            if not queue:
+                return
+            demo_id, h, badge, label = queue.pop(0)
+
         def prog(f: float, msg: str, _h=h) -> None:
             progress(f, f"{_h['title']}: {msg}")
 
@@ -90,32 +116,35 @@ def render_all(
 
     progress = progress or (lambda f, m: None)
     n = len(selection)
-    items = [
-        (d, h, f"#{n - i}", match_label(metas[d])) for i, (d, h) in enumerate(selection)
-    ]
-    # Balance workers by clip length.
-    buckets: list[list] = [[] for _ in range(max(1, jobs))]
-    loads = [0.0] * len(buckets)
-    for item in sorted(items, key=lambda it: -it[1]["duration"]):
-        k = loads.index(min(loads))
-        buckets[k].append(item)
-        loads[k] += item[1]["duration"]
     results: dict = {}
+    queue = []
+    for i, (d, h) in enumerate(selection):
+        badge, label = f"#{n - i}", match_label(metas[d])
+        done = _reusable(d, h, badge, label, opts)
+        if done:
+            log.info("reusing %s", done)
+            results[(d, h["id"])] = done
+        else:
+            queue.append((d, h, badge, label))
+    # Longest clips first; each worker takes the next one when it is free.
+    queue.sort(key=lambda it: -it[1]["duration"])
     lock = threading.Lock()
     started = time.time()
 
     def worker_progress(f: float, msg: str) -> None:
         progress(min(0.95, (len(results) + f) / max(1, n) * 0.95), msg)
 
-    with BackgroundServer() as srv:
-        threads = [
-            threading.Thread(target=_render_batch, args=(srv.url, b, opts, worker_progress, results, lock), daemon=True)
-            for b in buckets if b
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+    if queue:
+        with BackgroundServer() as srv:
+            threads = [
+                threading.Thread(target=_render_worker, args=(srv.url, queue, opts, worker_progress, results, lock),
+                                 daemon=True)
+                for _ in range(max(1, min(jobs, len(queue))))
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
     log.info("rendered %d clips in %.0fs", len(results), time.time() - started)
     missing = [h["id"] for d, h in selection if (d, h["id"]) not in results]
     if missing:

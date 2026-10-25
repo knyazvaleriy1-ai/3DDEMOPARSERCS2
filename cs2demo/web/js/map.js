@@ -272,11 +272,15 @@ export class MapView {
 
     if (playerBounds) this.uniforms.uHeight.value.set(playerBounds.min.y - 40, playerBounds.max.y + 90);
     if (mesh) {
-      const obj = new THREE.Mesh(mesh, this._material());
-      obj.castShadow = true;
-      obj.receiveShadow = true;
-      obj.frustumCulled = false;
-      this.group.add(obj);
+      // Chunks of 1024u let the renderer skip everything outside the view
+      // (big maps like Inferno have ~0.5M triangles).
+      const material = this._material();
+      for (const part of chunkGeometry(mesh, 1024)) {
+        const obj = new THREE.Mesh(part, material);
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+        this.group.add(obj);
+      }
       mesh.computeBoundingBox();
       this.bounds = mesh.boundingBox.clone();
       this.kind = 'mesh';
@@ -421,4 +425,38 @@ export function parseMesh(buffer) {
   // Shading uses per-pixel flat normals; vertex normals only feed the shadow normal bias.
   geo.computeVertexNormals();
   return geo;
+}
+
+/**
+ * Split an indexed geometry into spatial chunks (by triangle centroid on the
+ * XZ grid). Chunks share the vertex attributes; each gets its own index and a
+ * bounding volume of just its triangles, so frustum culling works per chunk.
+ */
+export function chunkGeometry(geo, cell = 1024) {
+  const pos = geo.attributes.position.array;
+  const idx = geo.index.array;
+  const buckets = new Map();
+  for (let t = 0; t < idx.length; t += 3) {
+    const a = idx[t] * 3, b = idx[t + 1] * 3, c = idx[t + 2] * 3;
+    const cx = (pos[a] + pos[b] + pos[c]) / 3;
+    const cz = (pos[a + 2] + pos[b + 2] + pos[c + 2]) / 3;
+    const key = `${Math.floor(cx / cell)},${Math.floor(cz / cell)}`;
+    let tris = buckets.get(key);
+    if (!tris) buckets.set(key, (tris = []));
+    tris.push(idx[t], idx[t + 1], idx[t + 2]);
+  }
+  const v = new THREE.Vector3();
+  const out = [];
+  for (const tris of buckets.values()) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', geo.attributes.position);
+    if (geo.attributes.normal) g.setAttribute('normal', geo.attributes.normal);
+    g.setIndex(new THREE.BufferAttribute(new Uint32Array(tris), 1));
+    const box = new THREE.Box3();
+    for (const i of tris) box.expandByPoint(v.fromArray(pos, i * 3));
+    g.boundingBox = box;
+    g.boundingSphere = box.getBoundingSphere(new THREE.Sphere());
+    out.push(g);
+  }
+  return out;
 }

@@ -1,9 +1,10 @@
+import json
 import subprocess
 
 import pytest
 
-from cs2demo import media
-from cs2demo.montage import concat, match_label, select
+from cs2demo import media, storage
+from cs2demo.montage import _reusable, concat, match_label, select
 
 
 def _meta(highlights, clans=("Team A", "Team B")):
@@ -32,6 +33,21 @@ def test_select_countdown_and_include():
 def test_match_label():
     assert match_label(_meta([], ("9z", "PV"))) == "9z vs PV · de_test"
     assert match_label({"map": "de_x", "players": []}) == "T vs CT · de_x"
+
+
+def test_reuse_only_with_same_settings(data_dir):
+    h = _h("r01-x-3k", 50)
+    clip = storage.clips_dir("a") / "r01-x-3k-first-montage.mp4"
+    clip.write_bytes(b"")
+    side = {"width": 1280, "height": 720, "fps": 30, "pov": "first", "slowmo": True, "hud": True,
+            "detail": "high", "sound": True, "badge": "#3", "match": "A vs B · de_x"}
+    clip.with_suffix(".json").write_text(json.dumps(side))
+    opts = {"width": 1280, "height": 720, "fps": 30, "pov": "first", "slowmo": True, "hud": True,
+            "detail": "high", "sound": True}
+    assert _reusable("a", h, "#3", "A vs B · de_x", opts) == clip
+    assert _reusable("a", h, "#2", "A vs B · de_x", opts) is None      # moved in the countdown
+    assert _reusable("a", h, "#3", "A vs B · de_x", {**opts, "width": 640}) is None
+    assert _reusable("a", _h("r02-y-4k", 60), "#3", "A vs B · de_x", opts) is None
 
 
 FFMPEG = media.ffmpeg_exe()
