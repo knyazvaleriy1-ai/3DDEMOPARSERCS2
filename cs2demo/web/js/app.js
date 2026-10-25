@@ -208,6 +208,14 @@ class App {
     $('btn-prev-round').onclick = () => this.jumpRound(-1);
     $('btn-next-round').onclick = () => this.jumpRound(1);
     $('speed-select').onchange = (e) => { v.speed = Number(e.target.value); };
+    const audio = v.audio;
+    const syncSound = () => {
+      $('btn-sound').textContent = audio.muted || audio.volume === 0 ? '🔇' : '🔊';
+      $('volume').value = String(audio.volume);
+    };
+    $('btn-sound').onclick = () => { audio.ensure(); audio.setMuted(!audio.muted); syncSound(); };
+    $('volume').oninput = (e) => { audio.ensure(); audio.setVolume(Number(e.target.value)); if (audio.muted) audio.setMuted(false); syncSound(); };
+    syncSound();
     $('round-select').onchange = (e) => {
       const r = this.demo.rounds[Number(e.target.value)];
       v.setTick(r.freezeEnd - 2 * this.demo.tickRate);
@@ -224,6 +232,7 @@ class App {
         case 'BracketRight': this._speedStep(1); break;
         case 'Tab': e.preventDefault(); this._cycleFocus(e.shiftKey ? -1 : 1); break;
         case 'Escape': this.hideLibrary(); break;
+        case 'KeyM': $('btn-sound').click(); break;
         default: {
           const modes = { Digit1: 'free', Digit2: 'follow', Digit3: 'pov', Digit4: 'chase', Digit5: 'top', Digit6: 'overview' };
           if (modes[e.code]) v.setMode(modes[e.code]);

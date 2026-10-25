@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, maps, media, storage
+from . import __version__, maps, media, models, storage
 from .highlights import DEFAULTS as HIGHLIGHT_DEFAULTS
 from .highlights import detect_highlights
 from .jobs import JobRegistry, import_demo, is_parsed
@@ -50,6 +50,8 @@ class RenderRequest(BaseModel):
     fps: int = 30
     slowmo: bool = False
     hud: bool = True
+    sound: bool = True
+    quality: str = "auto"
 
 
 def _check_id(demo_id: str) -> str:
@@ -250,6 +252,27 @@ def create_app() -> FastAPI:
             raise HTTPException(503, f"Не удалось скачать радар: {exc}") from exc
         return FileResponse(path, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
 
+    # -- sounds -------------------------------------------------------------------
+
+    @app.get("/api/sounds")
+    def sounds() -> list[dict[str, str]]:
+        return media.list_sounds()
+
+    # -- player models -----------------------------------------------------------
+
+    @app.get("/api/models")
+    def model_info() -> dict[str, Any]:
+        return models.info()
+
+    @app.get("/api/models/file/{name}")
+    def model_file(name: str) -> FileResponse:
+        if not storage.is_valid_id(name) or not name.endswith(".glb"):
+            raise HTTPException(400, "Некорректное имя модели")
+        path = models.models_dir() / name
+        if not path.is_file():
+            raise HTTPException(404, "Модель не найдена")
+        return FileResponse(path, media_type="model/gltf-binary", headers={"Cache-Control": "no-cache"})
+
     # -- clips -------------------------------------------------------------------
 
     @app.get("/api/clips")
@@ -284,18 +307,19 @@ def create_app() -> FastAPI:
         record["source"] = "browser"
         media.write_sidecar(dest, record)
 
-        # WebM (MediaRecorder) and VP9-in-MP4 (WebCodecs fallback) are re-encoded
-        # to H.264 MP4 so the clips play anywhere and upload to any site.
-        needs_h264 = ext == ".webm" or record.get("codec") not in (None, "avc")
-        if needs_h264 and media.ffmpeg_exe():
+        # WebM (MediaRecorder), VP9-in-MP4 (WebCodecs fallback) and Opus audio are
+        # converted to H.264 + AAC so the clips play anywhere and upload to any site.
+        video_ok = ext == ".mp4" and record.get("codec") in (None, "avc")
+        audio_ok = record.get("audioCodec") in (None, "aac")
+        if not (video_ok and audio_ok) and media.ffmpeg_exe():
             def convert() -> None:
                 src = dest
                 if dest.suffix == ".mp4":  # VP9 in MP4: move aside, re-encode in place
                     src = dest.with_name(dest.stem + ".src.mp4")
                     dest.replace(src)
                 mp4 = dest.with_suffix(".mp4")
-                if media.transcode_to_mp4(src, mp4):
-                    media.write_sidecar(mp4, {**record, "codec": "avc"})
+                if media.transcode_to_mp4(src, mp4, copy_video=video_ok):
+                    media.write_sidecar(mp4, {**record, "codec": "avc", "audioCodec": "aac"})
                     src.unlink(missing_ok=True)
                 elif src != dest:
                     src.replace(dest)
@@ -347,6 +371,8 @@ def create_app() -> FastAPI:
             pov=req.pov,
             slowmo=req.slowmo,
             hud=req.hud,
+            sound=req.sound,
+            detail=req.quality if req.quality in ("auto", "low", "high") else "auto",
         )
         return {"job": key, "clips": [h["id"] for h in chosen]}
 
@@ -362,5 +388,8 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": str(exc)}, status_code=400)
 
     app.mount("/clips", StaticFiles(directory=storage.clips_dir()), name="clips")
+    sounds_dir = storage.data_root() / "sounds"
+    sounds_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/sounds", StaticFiles(directory=sounds_dir), name="sounds")
     app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
     return app

@@ -1,6 +1,8 @@
-// Player models, name labels, death markers.
+// Player rendering: animated skinned models when available (see skinned.js),
+// otherwise simple team-coloured capsules; name/HP labels; death markers.
 import * as THREE from '../vendor/three.module.min.js';
 import { COLORS } from './util.js';
+import { RENDER_ORDER, SkinnedPlayer, ghostMaterial } from './skinned.js';
 
 const EYE_STAND = 64;
 const EYE_CROUCH = 46;
@@ -24,14 +26,17 @@ function teamMaterials(side) {
     head: new THREE.MeshLambertMaterial({ color: color.clone().lerp(new THREE.Color(0xffffff), 0.25) }),
     gun: new THREE.MeshLambertMaterial({ color: 0x222222 }),
     ring: new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthWrite: false }),
-    ghost: new THREE.MeshBasicMaterial({
-      color, transparent: true, opacity: 0.38, depthWrite: false, depthFunc: THREE.GreaterDepth,
-    }),
+    ghost: ghostMaterial(color),
   };
 }
 
 const MATS = { T: teamMaterials('T'), CT: teamMaterials('CT') };
 const SELECT_RING = new THREE.MeshBasicMaterial({ color: 0xffd34d, transparent: true, opacity: 0.95, depthWrite: false });
+const blobGeo = new THREE.CircleGeometry(15, 24);
+blobGeo.rotateX(-Math.PI / 2);
+const BLOB = new THREE.MeshBasicMaterial({
+  color: 0x000000, transparent: true, opacity: 0.32, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2,
+});
 
 class Label {
   constructor() {
@@ -43,7 +48,7 @@ class Label {
     this.texture.colorSpace = THREE.SRGBColorSpace;
     this.texture.minFilter = THREE.LinearFilter;
     this.sprite = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: this.texture, depthTest: false, depthWrite: false, sizeAttenuation: false, transparent: true,
+      map: this.texture, depthTest: false, depthWrite: false, sizeAttenuation: false, transparent: true, fog: false,
     }));
     this.sprite.renderOrder = 20;
     this.sprite.center.set(0.5, 0);
@@ -75,7 +80,6 @@ class Label {
       c.font = '700 14px system-ui, sans-serif';
       c.fillText(badge, 128 + w / 2 - 24, 21);
     }
-    // HP bar
     c.fillStyle = 'rgba(10,12,15,0.8)';
     c.fillRect(78, 42, 100, 8);
     c.fillStyle = hp > 30 ? '#3fb950' : '#e5484d';
@@ -94,10 +98,12 @@ function roundRect(c, x, y, w, h, r) {
   c.closePath();
 }
 
-class PlayerModel {
-  constructor(index, name) {
+/** Fallback model when no glTF character is available. */
+class CapsulePlayer {
+  constructor(index, name, label) {
     this.index = index;
     this.name = name;
+    this.label = label;
     this.side = 'T';
     this.root = new THREE.Group();
     this.body = new THREE.Mesh(bodyGeo, MATS.T.body);
@@ -107,36 +113,53 @@ class PlayerModel {
     this.gun = new THREE.Mesh(gunGeo, MATS.T.gun);
     this.cone = new THREE.Mesh(dirGeo, MATS.T.ring);
     this.aim.add(this.gun, this.cone);
-    this.ring = new THREE.Mesh(ringGeo, MATS.T.ring);
-    this.ring.position.y = 1.5;
     this.ghostBody = new THREE.Mesh(bodyGeo, MATS.T.ghost);
     this.ghostHead = new THREE.Mesh(headGeo, MATS.T.ghost);
-    this.ghostBody.renderOrder = 10;
-    this.ghostHead.renderOrder = 10;
-    this.label = new Label();
-    this.root.add(this.body, this.head, this.aim, this.ring, this.ghostBody, this.ghostHead, this.label.sprite);
+    this.ghostBody.renderOrder = this.ghostHead.renderOrder = RENDER_ORDER.ghost;
+    this.body.renderOrder = this.head.renderOrder = this.gun.renderOrder = RENDER_ORDER.player;
+    this.root.add(this.body, this.head, this.aim, this.ghostBody, this.ghostHead, label.sprite);
   }
 
-  setSide(side) {
-    if (side === this.side) return;
-    this.side = side;
-    const m = MATS[side];
-    this.body.material = m.body;
-    this.head.material = m.head;
-    this.cone.material = m.ring;
-    this.ghostBody.material = m.ghost;
-    this.ghostHead.material = m.ghost;
-    if (this.ring.material !== SELECT_RING) this.ring.material = m.ring;
+  update(st, ctx) {
+    if (st.side !== this.side) {
+      this.side = st.side;
+      const m = MATS[st.side];
+      this.body.material = m.body;
+      this.head.material = m.head;
+      this.cone.material = m.ring;
+      this.ghostBody.material = m.ghost;
+      this.ghostHead.material = m.ghost;
+    }
+    this.root.position.set(st.x, st.z, -st.y);
+    const crouch = 1 - 0.25 * st.duck;
+    this.body.scale.set(1, crouch, 1);
+    this.ghostBody.scale.set(1, crouch, 1);
+    this.head.position.y = ctx.eyeH;
+    this.ghostHead.position.y = ctx.eyeH;
+    this.aim.position.y = ctx.eyeH - 12;
+    this.aim.rotation.y = st.yaw * DEG;
+    this.aim.rotation.z = -st.pitch * DEG;
+    this.ghostBody.visible = this.ghostHead.visible = ctx.options.xray;
   }
 }
 
 export class PlayersView {
-  constructor(scene, demo) {
+  /** ``assets``: result of loadPlayerAssets() or null for capsules. */
+  constructor(scene, demo, assets = null) {
     this.demo = demo;
     this.group = new THREE.Group();
     scene.add(this.group);
+    this.skinned = !!assets;
     this.models = demo.players.map((p, i) => {
-      const m = new PlayerModel(i, p.name);
+      const label = new Label();
+      const m = assets ? new SkinnedPlayer(i, p.name, assets, label) : new CapsulePlayer(i, p.name, label);
+      const ring = new THREE.Mesh(ringGeo, MATS.T.ring);
+      ring.position.y = 1.5;
+      m.ring = ring;
+      m.root.add(ring);
+      m.blob = new THREE.Mesh(blobGeo, BLOB);
+      m.blob.position.y = 0.6;
+      m.root.add(m.blob);
       this.group.add(m.root);
       return m;
     });
@@ -144,8 +167,10 @@ export class PlayersView {
     this.deathGroup = new THREE.Group();
     scene.add(this.deathGroup);
     this.deathTex = { T: crossTexture(COLORS.T), CT: crossTexture(COLORS.CT) };
-    this.options = { xray: true, labels: true, deaths: true };
+    // With real models the bodies stay on the ground instead of X markers.
+    this.options = { xray: true, labels: true, deaths: !assets };
     this.labelScale = 0.05;
+    this.lastTick = null;
   }
 
   /** Eye position in scene coordinates for a player state. */
@@ -159,38 +184,53 @@ export class PlayersView {
     return out.set(Math.cos(p) * Math.cos(y), -Math.sin(p), -Math.cos(p) * Math.sin(y));
   }
 
+  /** Last death of ``p`` in the current round, or null. */
+  _death(p, tick, roundStart) {
+    let found = null;
+    for (const k of this.demo.kills) {
+      if (k.tick > tick) break;
+      if (k.victim === p && k.tick >= roundStart) found = k;
+    }
+    return found;
+  }
+
   update(tick, states, ctx) {
-    const { hidden = -1, selected = -1, bombCarrier = -1 } = ctx;
+    const { hidden = -1, selected = -1, bombCarrier = -1, roundStart = 0 } = ctx;
+    const rate = this.demo.tickRate;
+    let dt = this.lastTick === null ? 0 : (tick - this.lastTick) / rate;
+    if (dt < 0 || dt > 0.5) dt = 0; // seek
+    this.lastTick = tick;
     for (const m of this.models) {
       const st = states[m.index];
-      const visible = st.present && st.alive && m.index !== hidden;
+      let death = null;
+      if (st.present && !st.alive && this.skinned) death = this._death(m.index, tick, roundStart);
+      const visible = st.present && m.index !== hidden && (st.alive || !!death);
       m.root.visible = visible;
-      if (!visible) continue;
-      m.setSide(st.side);
-      m.root.position.set(st.x, st.z, -st.y);
-      const crouch = 1 - 0.25 * st.duck;
-      m.body.scale.set(1, crouch, 1);
-      m.ghostBody.scale.set(1, crouch, 1);
+      if (!visible) {
+        if (m.lastX !== undefined) m.lastX = null;
+        continue;
+      }
       const eyeH = EYE_STAND - (EYE_STAND - EYE_CROUCH) * st.duck;
-      m.head.position.y = eyeH;
-      m.ghostHead.position.y = eyeH;
-      m.aim.position.y = eyeH - 12;
-      m.aim.rotation.y = st.yaw * DEG;
-      m.aim.rotation.z = -st.pitch * DEG;
-      m.ghostBody.visible = m.ghostHead.visible = this.options.xray;
+      m.update(st, {
+        dt, eyeH, options: this.options, death,
+        deathAge: death ? (tick - death.tick) / rate : 0,
+      });
       const isSel = m.index === selected;
+      m.ring.visible = st.alive;
+      m.blob.visible = st.alive;
       m.ring.material = isSel ? SELECT_RING : MATS[st.side].ring;
       m.ring.scale.setScalar(isSel ? 1.35 : 1);
-      m.label.sprite.visible = this.options.labels;
-      if (this.options.labels) {
+      const showLabel = this.options.labels && st.alive;
+      m.label.sprite.visible = showLabel;
+      if (showLabel) {
         m.label.draw(m.name, st.side, st.hp, m.index === bombCarrier ? 'C4' : '', isSel);
-        m.label.sprite.position.y = eyeH + 14;
+        m.label.sprite.position.y = eyeH + 16;
         // sizeAttenuation=false: scale is relative to the viewport height.
         const s = this.labelScale;
         m.label.sprite.scale.set(s * 4, s, 1);
       }
     }
-    this._deaths(tick, ctx.roundStart ?? 0);
+    this._deaths(tick, roundStart);
   }
 
   _deaths(tick, roundStart) {

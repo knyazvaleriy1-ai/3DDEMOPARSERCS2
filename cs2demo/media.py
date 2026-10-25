@@ -12,6 +12,7 @@ from typing import Any
 from . import storage
 
 VIDEO_EXTS = (".mp4", ".webm", ".mkv")
+AUDIO_EXTS = (".wav", ".mp3", ".ogg", ".flac", ".m4a")
 
 
 def ffmpeg_exe() -> str | None:
@@ -26,15 +27,18 @@ def ffmpeg_exe() -> str | None:
         return None
 
 
-def transcode_to_mp4(src: Path, dest: Path) -> bool:
+def transcode_to_mp4(src: Path, dest: Path, copy_video: bool = False) -> bool:
+    """Re-encode to H.264 + AAC MP4 (``copy_video`` keeps an H.264 stream as is)."""
     exe = ffmpeg_exe()
     if not exe:
         return False
     tmp = dest.with_name(dest.stem + ".part.mp4")
-    cmd = [
-        exe, "-y", "-loglevel", "error", "-i", str(src),
+    video = ["-c:v", "copy"] if copy_video else [
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart", "-an", str(tmp),
+    ]  # fmt: skip
+    cmd = [
+        exe, "-y", "-loglevel", "error", "-i", str(src), *video,
+        "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(tmp),
     ]  # fmt: skip
     proc = subprocess.run(cmd, capture_output=True, check=False)
     if proc.returncode != 0 or not tmp.exists():
@@ -47,17 +51,19 @@ def transcode_to_mp4(src: Path, dest: Path) -> bool:
 class FrameEncoder:
     """Pipes JPEG frames into ffmpeg and writes an H.264 MP4."""
 
-    def __init__(self, dest: Path, fps: int, crf: int = 20):
+    def __init__(self, dest: Path, fps: int, crf: int = 20, audio: Path | None = None):
         exe = ffmpeg_exe()
         if not exe:
             raise RuntimeError("ffmpeg не найден: установите ffmpeg или пакет imageio-ffmpeg")
         self.dest = dest
         self.tmp = dest.with_name(dest.stem + ".part.mp4")
+        audio_in = ["-i", str(audio)] if audio else []
+        audio_out = ["-map", "0:v", "-map", "1:a", "-c:a", "aac", "-b:a", "160k", "-shortest"] if audio else []
         cmd = [
             exe, "-y", "-loglevel", "error",
-            "-f", "image2pipe", "-framerate", str(fps), "-c:v", "mjpeg", "-i", "-",
+            "-f", "image2pipe", "-framerate", str(fps), "-c:v", "mjpeg", "-i", "-", *audio_in,
             "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p",
-            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", *audio_out,
             "-movflags", "+faststart", str(self.tmp),
         ]  # fmt: skip
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -122,3 +128,15 @@ def list_clips(demo_id: str | None = None) -> list[dict[str, Any]]:
             )
     out.sort(key=lambda c: c["created"], reverse=True)
     return out
+
+
+def list_sounds() -> list[dict[str, str]]:
+    """User sound overrides in <data>/sounds (file stem = sound name)."""
+    root = storage.data_root() / "sounds"
+    if not root.is_dir():
+        return []
+    return [
+        {"name": p.stem.lower(), "file": p.name, "url": f"/sounds/{p.name}"}
+        for p in sorted(root.iterdir())
+        if p.suffix.lower() in AUDIO_EXTS and storage.is_valid_id(p.name.lower())
+    ]

@@ -174,6 +174,18 @@ export class DemoData {
     return state;
   }
 
+  /** Tick of the latest shot by ``p`` at or before ``tick`` (within 1 s), or null. */
+  lastShotTick(p, tick) {
+    const shots = this.shots;
+    let lo = 0, hi = shots.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (shots[mid][0] <= tick) lo = mid + 1; else hi = mid; }
+    for (let i = lo - 1; i >= 0; i--) {
+      if (tick - shots[i][0] > this.tickRate) break;
+      if (shots[i][1] === p) return shots[i][0];
+    }
+    return null;
+  }
+
   killsBetween(t0, t1) {
     const out = [];
     for (const k of this.kills) {

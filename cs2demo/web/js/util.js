@@ -101,3 +101,40 @@ export function toast(message, kind = 'info', ms = 3500) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.add('hidden'), ms);
 }
+
+// -- weapon / killfeed icons ------------------------------------------------------
+
+const ICON_BY_WEAPON = {
+  ak47: 'ak47', 'ak-47': 'ak47', galilar: 'galil', 'galil ar': 'galil',
+  m4a1: 'm4', m4a4: 'm4', m4a1_silencer: 'm4', m4a1_silencer_off: 'm4', 'm4a1-s': 'm4',
+  famas: 'famas', aug: 'aug', sg556: 'aug', 'sg 553': 'aug',
+  awp: 'sniper', ssg08: 'sniper', 'ssg 08': 'sniper', scar20: 'auto_sniper', 'scar-20': 'auto_sniper', g3sg1: 'auto_sniper',
+  glock: 'glock', 'glock-18': 'glock', usp_silencer: 'usp', usp_silencer_off: 'usp', 'usp-s': 'usp',
+  hkp2000: 'usp', p2000: 'usp', p250: 'pistol', fiveseven: 'pistol', 'five-seven': 'pistol', elite: 'pistol',
+  'dual berettas': 'pistol', deagle: 'deagle', 'desert eagle': 'deagle', revolver: 'revolver', 'r8 revolver': 'revolver',
+  tec9: 'tec9', 'tec-9': 'tec9', cz75a: 'cz75', 'cz75-auto': 'cz75',
+  mac10: 'mac10', 'mac-10': 'mac10', mp9: 'mp9', mp7: 'mp7', mp5sd: 'mp5', 'mp5-sd': 'mp5', ump45: 'ump', 'ump-45': 'ump',
+  p90: 'p90', bizon: 'bizon', 'pp-bizon': 'bizon',
+  nova: 'shotgun', xm1014: 'shotgun', mag7: 'sawedoff', 'mag-7': 'sawedoff', sawedoff: 'sawedoff', 'sawed-off': 'sawedoff',
+  m249: 'lmg', negev: 'lmg',
+  taser: 'taser', 'zeus x27': 'taser',
+  hegrenade: 'he', 'high explosive grenade': 'he', flashbang: 'flash', smokegrenade: 'smoke', 'smoke grenade': 'smoke',
+  inferno: 'molotov', molotov: 'molotov', incgrenade: 'molotov', 'incendiary grenade': 'molotov',
+  decoy: 'decoy', 'decoy grenade': 'decoy', c4: 'c4', planted_c4: 'c4', 'c4 explosive': 'c4', world: 'world',
+};
+
+/** Icon key (see icons.js) for an event weapon name or a display name. */
+export function weaponIcon(raw) {
+  const name = (raw || '').toLowerCase().replace(/^weapon_/, '').trim();
+  if (!name) return null;
+  if (isKnife(name) || name.startsWith('knife') || name === 'bayonet') return 'knife';
+  return ICON_BY_WEAPON[name] || null;
+}
+
+/** Inline SVG markup for an icon, ``height`` px tall. */
+export function iconSvg(icons, key, height = 14, color = 'currentColor') {
+  const ic = icons[key];
+  if (!ic) return '';
+  const w = Math.round((ic.w / ic.h) * height);
+  return `<svg class="icon" viewBox="0 0 ${ic.w} ${ic.h}" width="${w}" height="${height}" aria-hidden="true"><path fill="${color}" d="${ic.d}"/></svg>`;
+}

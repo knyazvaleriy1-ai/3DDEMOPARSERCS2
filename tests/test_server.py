@@ -80,3 +80,25 @@ def test_frames_without_gzip(client, parsed_demo):
     raw = gzip.decompress((storage.parsed_dir(parsed_demo) / "frames.bin.gz").read_bytes())
     res = client.get(f"/api/demos/{parsed_demo}/frames", headers={"Accept-Encoding": "identity"})
     assert res.content == raw
+
+
+def test_models_and_sounds(client, data_dir):
+    from cs2demo import models
+
+    fake = models.models_dir() / models.DEFAULT_NAME
+    fake.write_bytes(b"glTF-binary-placeholder")
+    info = client.get("/api/models").json()
+    assert info["t"]["file"] == models.DEFAULT_NAME and info["ct"]["custom"] is False
+    (models.models_dir() / "player_ct.glb").write_bytes(b"custom")
+    info = client.get("/api/models").json()
+    assert info["ct"] == {"file": "player_ct.glb", "custom": True} and info["t"]["file"] == models.DEFAULT_NAME
+    assert client.get("/api/models/file/player_ct.glb").content == b"custom"
+    assert client.get("/api/models/file/..%2Fsecret.glb").status_code in (400, 404)
+    assert client.get("/api/models/file/notes.txt").status_code == 400
+
+    sounds = data_dir / "sounds"
+    sounds.mkdir(exist_ok=True)
+    (sounds / "ak47.wav").write_bytes(b"RIFF....WAVE")
+    (sounds / "readme.txt").write_text("ignored")
+    listed = client.get("/api/sounds").json()
+    assert listed == [{"name": "ak47", "file": "ak47.wav", "url": "/sounds/ak47.wav"}]

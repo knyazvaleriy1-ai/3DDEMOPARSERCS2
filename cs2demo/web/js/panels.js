@@ -1,5 +1,6 @@
 // Sidebar tabs: players, highlights (+ clip recording), clips library, view settings.
-import { esc, fmtBytes, fmtMoney, fmtTime, fetchJSON, toast } from './util.js';
+import { esc, fmtBytes, fmtMoney, fmtTime, fetchJSON, iconSvg, toast, weaponIcon } from './util.js';
+import { ICONS } from './icons.js';
 import {
   ClipDirector, POV_LABELS, downloadBlob, exportMp4, exportRealtime, uploadClip, webCodecsSupported,
 } from './clips.js';
@@ -44,7 +45,12 @@ export class PlayersPanel {
       r.el.classList.toggle('selected', v.focus === r.p);
       r.hp.style.width = `${st.alive ? st.hp : 0}%`;
       r.hpWrap.classList.toggle('low', st.hp <= 30);
-      r.weapon.textContent = st.alive ? st.weapon : '—';
+      const weapon = st.alive ? st.weapon : '';
+      if (r.weaponName !== weapon) {
+        r.weaponName = weapon;
+        const key = weaponIcon(weapon);
+        r.weapon.innerHTML = weapon ? `${key ? iconSvg(ICONS, key, 13) : ''}<span>${esc(weapon)}</span>` : '—';
+      }
       r.money.textContent = fmtMoney(st.money);
       r.kda.textContent = `${s.k} / ${s.d} / ${s.a}${s.adr ? ` · ${s.adr} ADR` : ''}`;
       r.place.textContent = st.alive ? st.place : '';
@@ -130,6 +136,7 @@ export class HighlightsPanel {
         </div>
         <label class="check"><input type="checkbox" data-opt="slowmo" ${o.slowmo ? 'checked' : ''}> Замедление в момент киллов</label>
         <label class="check"><input type="checkbox" data-opt="hud" ${o.hud ? 'checked' : ''}> HUD, килфид и титры</label>
+        <label class="check"><input type="checkbox" data-opt="sound" ${o.sound ? 'checked' : ''}> Звук (выстрелы, гранаты, шаги)</label>
         <label class="check" title="После загрузки нового демо сразу записать 5 лучших хайлайтов">
           <input type="checkbox" data-opt="auto" ${o.auto ? 'checked' : ''}> Автозапись 5 лучших после загрузки демо</label>
         <div class="btn-row">
@@ -282,7 +289,7 @@ export class HighlightsPanel {
       for (let i = 0; i < list.length; i++) {
         const h = list[i];
         const director = new ClipDirector(this.viewer, h, {
-          pov: this.opts.pov, fps, width, height, slowmo: this.opts.slowmo, hud: this.opts.hud,
+          pov: this.opts.pov, fps, width, height, slowmo: this.opts.slowmo, hud: this.opts.hud, sound: this.opts.sound,
         });
         const label = `Клип ${i + 1}/${list.length}: ${h.title}`;
         const onProgress = (f) => {
@@ -322,7 +329,7 @@ export class HighlightsPanel {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clips: ids, pov: this.opts.pov, width, height, fps: this.opts.fps,
-          slowmo: this.opts.slowmo, hud: this.opts.hud }),
+          slowmo: this.opts.slowmo, hud: this.opts.hud, sound: this.opts.sound }),
       });
       this._status(`Рендер на сервере запущен (${res.clips.length} клип.)`);
       this._pollJob(res.job);
@@ -349,7 +356,7 @@ export class HighlightsPanel {
 }
 
 function loadOpts() {
-  const defaults = { pov: 'first', res: '720p', fps: 30, slowmo: false, hud: true, auto: false };
+  const defaults = { pov: 'first', res: '720p', fps: 30, slowmo: false, hud: true, sound: true, auto: false };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem('cs2demo.rec') || '{}') };
   } catch (_) {
@@ -436,6 +443,11 @@ export class ViewPanel {
         <label class="check"><input type="checkbox" data-s="xray" ${s.xray ? 'checked' : ''}> Видеть игроков сквозь стены</label>
         <label class="check"><input type="checkbox" data-s="grenades" ${s.grenades ? 'checked' : ''}> Траектории гранат</label>
         <label class="check"><input type="checkbox" data-s="tracers" ${s.tracers ? 'checked' : ''}> Трассеры выстрелов</label>
+        <label class="check"><input type="checkbox" data-s="shadows" ${s.shadows ? 'checked' : ''}> Тени от солнца</label>
+        <label class="check"><input type="checkbox" data-s="viewmodel" ${s.viewmodel ? 'checked' : ''}> Оружие в руках (от 1-го лица)</label>
+        <label class="check"><input type="checkbox" data-s="detail" ${s.detail ? 'checked' : ''}> Детальные материалы карты</label>
+        <label class="check"><input type="checkbox" data-s="radar" ${s.radar ? 'checked' : ''}> Радар на полу</label>
+        <label class="check"><input type="checkbox" data-s="grid" ${s.grid ? 'checked' : ''}> Сетка 64 юнита</label>
       </div>
       <div class="panel">
         <h3>Крыши и потолки</h3>

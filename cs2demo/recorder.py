@@ -60,9 +60,13 @@ def playwright_available() -> bool:
 
 
 def _launch_args() -> list[str]:
-    if os.environ.get("CS2DEMO_RENDER_GPU"):
-        return ["--ignore-gpu-blocklist", "--enable-gpu"]
-    return ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"]
+    """Use the GPU when Chromium can, fall back to SwiftShader (CPU) otherwise.
+
+    CS2DEMO_RENDER_GPU=0 forces software rendering.
+    """
+    if os.environ.get("CS2DEMO_RENDER_GPU") == "0":
+        return ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"]
+    return ["--ignore-gpu-blocklist", "--enable-gpu", "--enable-unsafe-swiftshader"]
 
 
 def render_highlights(
@@ -76,7 +80,9 @@ def render_highlights(
     pov: str = "first",
     slowmo: bool = False,
     hud: bool = True,
+    sound: bool = True,
     quality: float = 0.9,
+    detail: str = "auto",
     progress: ProgressFn | None = None,
 ) -> list[dict[str, Any]]:
     """Render ``highlights`` of ``demo_id`` to MP4 files; returns clip records."""
@@ -90,6 +96,9 @@ def render_highlights(
     out_dir = storage.clips_dir(demo_id)
     results: list[dict[str, Any]] = []
     url = f"{base_url.rstrip('/')}/?demo={demo_id}&render=1"
+    if detail in ("low", "high"):
+        # auto: full materials on a GPU, simplified ones on software GL
+        url += f"&quality={detail}"
 
     with sync_playwright() as pw:
         try:
@@ -123,11 +132,18 @@ def render_highlights(
 
             total = len(highlights)
             for n, h in enumerate(highlights):
-                opts = {"pov": pov, "fps": fps, "slowmo": slowmo, "hud": hud, "quality": quality}
+                opts = {"pov": pov, "fps": fps, "slowmo": slowmo, "hud": hud, "sound": sound, "quality": quality}
                 info = page.evaluate("([id, opts]) => window.cs2render.begin(id, opts)", [h["id"], opts])
                 frames = int(info["frames"])
                 dest = out_dir / f"{h['id']}-{pov}.mp4"
-                encoder = FrameEncoder(dest, fps)
+                wav = None
+                if sound:
+                    progress((n + 0.01) / total, f"Клип {n + 1}/{total}: звук")
+                    data = page.evaluate("() => window.cs2render.audio()")
+                    if data:
+                        wav = out_dir / f".{h['id']}-{pov}.wav"
+                        wav.write_bytes(base64.b64decode(data))
+                encoder = FrameEncoder(dest, fps, audio=wav)
                 started = time.time()
                 try:
                     batch = 4
@@ -143,6 +159,9 @@ def render_highlights(
                 except BaseException:
                     encoder.abort()
                     raise
+                finally:
+                    if wav:
+                        wav.unlink(missing_ok=True)
                 page.evaluate("() => window.cs2render.end()")
                 record = {
                     "highlight": h["id"],
@@ -155,6 +174,7 @@ def render_highlights(
                     "width": width,
                     "height": height,
                     "fps": fps,
+                    "sound": bool(wav),
                     "duration": round(frames / fps, 2),
                     "renderSeconds": round(time.time() - started, 1),
                     "source": "headless",

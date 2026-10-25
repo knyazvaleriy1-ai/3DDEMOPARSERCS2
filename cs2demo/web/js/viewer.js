@@ -4,8 +4,10 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
 import { PlayerState } from './demo.js';
 import { MapView } from './map.js';
 import { PlayersView } from './players.js';
+import { loadPlayerAssets, Viewmodel } from './skinned.js';
 import { EffectsView } from './effects.js';
 import { Hud } from './hud.js';
+import { LiveAudio } from './audio.js';
 import { clamp } from './util.js';
 
 const POV_FOV = 73.74; // CS2: 90° horizontal at 4:3
@@ -20,10 +22,10 @@ export class Viewer {
     this.renderer.setClearColor(0x14171c, 1);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.scene = new THREE.Scene();
-    this.scene.add(new THREE.HemisphereLight(0xe6eeff, 0x40382c, 1.6));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.6);
-    sun.position.set(0.45, 0.8, 0.35);
-    this.scene.add(sun);
+    this.hemi = new THREE.HemisphereLight(0xe6eeff, 0x40382c, 1.6);
+    this.sun = new THREE.DirectionalLight(0xffffff, 1.6);
+    this.sun.position.set(0.45, 0.8, 0.35);
+    this.scene.add(this.hemi, this.sun, this.sun.target);
     this.camera = new THREE.PerspectiveCamera(FREE_FOV, 16 / 9, 4, 80000);
     this.controls = new OrbitControls(this.camera, glCanvas);
     this.controls.enableDamping = true;
@@ -32,6 +34,14 @@ export class Viewer {
     this.controls.enabled = interactive;
     this.interactive = interactive;
     this.hud = new Hud(hudCanvas);
+    this.audio = interactive ? new LiveAudio() : null;
+    // Software GL (SwiftShader / llvmpipe, e.g. the headless clip renderer) gets
+    // cheaper materials and hard shadows.
+    const gl = this.renderer.getContext();
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const glName = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : '';
+    const quality = new URLSearchParams(location.search).get('quality');
+    this.softwareGL = quality ? quality === 'low' : /swiftshader|llvmpipe|software/i.test(String(glName));
     this.hudCanvas = hudCanvas;
 
     this.demo = null;
@@ -40,7 +50,11 @@ export class Viewer {
     this.speed = 1;
     this.mode = 'free';
     this.focus = -1;
-    this.settings = { roofCut: 'auto', cutHeight: 400, labels: true, xray: true, grenades: true, tracers: true };
+    this.settings = {
+      roofCut: 'auto', cutHeight: 400, labels: true, xray: true, grenades: true, tracers: true,
+      shadows: true, grid: false, radar: false, viewmodel: true, detail: true,
+    };
+    this.settings.detail = !this.softwareGL;
     this.clip = null; // highlight shown with a title card (recording)
     this.fixedSize = null;
     this.listeners = new Set();
@@ -109,8 +123,12 @@ export class Viewer {
     const bounds = this._playerBounds(demo);
     this.map = new MapView(this.scene);
     onProgress?.(0.92, 'Загрузка карты');
-    const kind = await this.map.load(demo.meta.map, bounds);
-    this.players = new PlayersView(this.scene, demo);
+    const [kind, assets] = await Promise.all([
+      this.map.load(demo.meta.map, bounds, { hemi: this.hemi, sun: this.sun, renderer: this.renderer }),
+      loadPlayerAssets(),
+    ]);
+    this.players = new PlayersView(this.scene, demo, assets);
+    this.viewmodel = assets ? new Viewmodel() : null;
     this.effects = new EffectsView(this.scene, demo);
     this.demo = demo;
     this.applySettings();
@@ -150,6 +168,19 @@ export class Viewer {
 
   applySettings() {
     if (!this.players) return;
+    this.map.setOptions({ grid: this.settings.grid, radar: this.settings.radar, detail: this.settings.detail });
+    const shadows = this.settings.shadows && this.map.kind === 'mesh';
+    if (shadows !== this._shadowsOn) {
+      // Toggling shadows changes shader defines: recompile, and re-render the
+      // (static) shadow map once.
+      this._shadowsOn = shadows;
+      const r = this.renderer;
+      r.shadowMap.enabled = shadows;
+      r.shadowMap.type = this.softwareGL ? THREE.BasicShadowMap : THREE.PCFShadowMap;
+      r.shadowMap.needsUpdate = true;
+      this.sun.castShadow = shadows;
+      this.scene.traverse((o) => { if (o.material) o.material.needsUpdate = true; });
+    }
     this.players.options.labels = this.settings.labels;
     this.players.options.xray = this.settings.xray;
     this.effects.options.grenades = this.settings.grenades;
@@ -162,6 +193,7 @@ export class Viewer {
     if (!this.demo) return;
     this.tick = clamp(t, this.demo.startTick, this.demo.endTick);
     this._hasSmooth = false;
+    this.audio?.reset();
     this._emit('seek');
   }
 
@@ -270,7 +302,17 @@ export class Viewer {
       }
     }
     this.update(dt);
+    if (this.audio) {
+      this.audio.frame(this.demo, this.tick, this.playing, this.speed, this._listener(), this.mode === 'pov' ? this.focus : -1);
+    }
     this._emit('frame');
+  }
+
+  /** Where sounds are heard from: the camera, in world units (Z up). */
+  _listener() {
+    const c = this.camera.position;
+    const dir = this.camera.getWorldDirection(this._v[3]);
+    return { x: c.x, y: -c.z, z: c.y, yaw: (Math.atan2(-dir.z, dir.x) * 180) / Math.PI };
   }
 
   /** Update every object for ``this.tick`` and render one frame. */
@@ -291,7 +333,9 @@ export class Viewer {
     });
     this.effects.update(tick, { roundStart, bomb });
     this.map.setCut(cam.cut);
+    this.map.follow(this.camera);
     this.renderer.render(this.scene, this.camera);
+    this._renderViewmodel(dt);
 
     const alive = { T: 0, CT: 0 };
     for (const st of this.states) if (st.present && st.alive) alive[st.side]++;
@@ -306,6 +350,28 @@ export class Viewer {
       blind: pov ? d.blindAt(this.focus, tick) : 0,
       clip: this.clip,
     });
+  }
+
+  /** First-person weapon, drawn over the scene after clearing depth. */
+  _renderViewmodel(dt) {
+    const vm = this.viewmodel;
+    if (!vm || this.mode !== 'pov' || this.focus < 0 || !this.settings.viewmodel) return;
+    const st = this.states[this.focus];
+    if (!st || !st.alive) return;
+    if (st.scoped && /awp|ssg|scar|g3sg1/i.test(st.weapon)) return; // scope overlay instead
+    const shot = this.demo.lastShotTick(this.focus, this.tick);
+    const model = this.players.models[this.focus];
+    const shown = vm.update(this.camera, st, {
+      dt: Math.max(0, dt) * this.speed,
+      speed: model && model.speed !== undefined ? model.speed : 0,
+      shotAge: shot === null ? -1 : (this.tick - shot) / this.demo.tickRate,
+    });
+    if (!shown) return;
+    const r = this.renderer;
+    r.autoClear = false;
+    r.clearDepth();
+    r.render(vm.scene, this.camera);
+    r.autoClear = true;
   }
 
   _cutFor(playerY) {

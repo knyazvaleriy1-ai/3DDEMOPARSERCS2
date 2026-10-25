@@ -1,7 +1,24 @@
 // 2D overlay drawn on a canvas: score/timer, killfeed, first-person HUD,
 // flashbang/scope overlays and clip title cards. The same canvas is
 // composited into recorded clips, so everything visible here ends up in them.
-import { COLORS, fmtTime, weaponName } from './util.js';
+import { COLORS, fmtTime, weaponIcon, weaponName } from './util.js';
+import { ICONS } from './icons.js';
+
+const pathCache = new Map();
+function iconPath(key) {
+  let p = pathCache.get(key);
+  if (!p) {
+    p = new Path2D(ICONS[key].d);
+    pathCache.set(key, p);
+  }
+  return p;
+}
+
+// Side of the assister at the time of the kill (assists can come from either team in theory).
+function sideOfPlayer(k, demo) {
+  const as = demo.state(k.assister, k.tick);
+  return as.present ? as.side : k.attackerSide || 'T';
+}
 
 const FONT = '"Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif';
 const ROUND_SECONDS = 115;
@@ -99,6 +116,37 @@ export class Hud {
     this._text(`Раунд ${round.num}`, W / 2, y + 36 * s, 11 * s, '#8b93a1', 'center', 500);
   }
 
+  /** Draw icon ``key`` with its left edge at x, vertically centred on y. Returns width. */
+  _icon(key, x, y, height, color = '#e7e9ee') {
+    const ic = ICONS[key];
+    if (!ic) return 0;
+    const c = this.ctx;
+    const k = height / ic.h;
+    c.save();
+    c.translate(x, y - height / 2);
+    c.scale(k, k);
+    c.fillStyle = color;
+    c.fill(iconPath(key));
+    c.restore();
+    if (key === 'noscope') {
+      // CS-style "no scope": the crosshair struck through.
+      c.save();
+      c.strokeStyle = color;
+      c.lineWidth = Math.max(1.5, height * 0.12);
+      c.beginPath();
+      c.moveTo(x + height * 0.05, y + height * 0.45);
+      c.lineTo(x + height * 0.95, y - height * 0.45);
+      c.stroke();
+      c.restore();
+    }
+    return ic.w * k;
+  }
+
+  _iconWidth(key, height) {
+    const ic = ICONS[key];
+    return ic ? (ic.w / ic.h) * height : 0;
+  }
+
   _killfeed(info, W, s) {
     const { demo, tick, roundStart } = info;
     const rate = demo.tickRate;
@@ -106,35 +154,56 @@ export class Hud {
     const kills = demo.killsBetween(Math.max(roundStart ?? 0, tick - window), tick).slice(-6);
     let y = 10 * s;
     const c = this.ctx;
+    const size = 14 * s;
+    const gap = 7 * s, pad = 10 * s;
+    const weaponH = 17 * s, modH = 16 * s;
     for (const k of kills) {
-      const a = k.attacker >= 0 ? demo.players[k.attacker].name : '';
+      const a = k.attacker >= 0 && k.attacker !== k.victim ? demo.players[k.attacker].name : '';
       const v = demo.players[k.victim].name;
-      const w = weaponName(k.weapon);
-      const marks = [k.blind && 'ослепл.', k.noscope && 'NS', k.smoke && 'дым', k.penetrated && 'WB', k.headshot && 'HS']
-        .filter(Boolean).join(' ');
-      const size = 14 * s;
-      c.font = `600 ${size}px ${FONT}`;
-      const wa = a ? c.measureText(a).width : 0;
-      const wv = c.measureText(v).width;
-      c.font = `500 ${12 * s}px ${FONT}`;
-      const ww = c.measureText(w + (marks ? '  ' + marks : '')).width;
-      const pad = 10 * s, gap = 10 * s;
-      const total = pad * 2 + wa + (a ? gap : 0) + ww + gap + wv;
+      const assist = k.assister >= 0 ? demo.players[k.assister].name : '';
+      // [blind] attacker [+ assister] weapon [noscope] [smoke] [wallbang] [headshot] [air] victim
+      const parts = [];
+      if (k.blind) parts.push({ icon: 'blind', h: modH, color: '#ffffff' });
+      if (a) parts.push({ text: a, color: COLORS[k.attackerSide || 'T'], size, weight: 600 });
+      if (assist) {
+        parts.push({ text: '+', color: '#d5d9e0', size, weight: 600 });
+        if (k.flashAssist) parts.push({ icon: 'assist', h: modH * 0.9, color: '#ffffff' });
+        parts.push({ text: assist, color: COLORS[sideOfPlayer(k, demo)], size: size * 0.9, weight: 500 });
+      }
+      const wKey = weaponIcon(k.weapon);
+      if (wKey) parts.push({ icon: wKey, h: weaponH, color: '#ffffff', wide: true });
+      else parts.push({ text: weaponName(k.weapon), color: '#d5d9e0', size: 12 * s, weight: 500 });
+      if (k.noscope) parts.push({ icon: 'noscope', h: modH, color: '#ffffff' });
+      if (k.smoke) parts.push({ icon: 'thrusmoke', h: modH, color: '#ffffff' });
+      if (k.penetrated) parts.push({ icon: 'wallbang', h: modH, color: '#ffffff' });
+      if (k.headshot) parts.push({ icon: 'headshot', h: modH * 1.05, color: '#ffffff' });
+      if (k.air) parts.push({ icon: 'air', h: modH, color: '#ffffff' });
+      parts.push({ text: v, color: COLORS[k.victimSide || 'CT'], size, weight: 600 });
+
+      for (const p of parts) {
+        if (p.text !== undefined) {
+          c.font = `${p.weight} ${p.size}px ${FONT}`;
+          p.w = c.measureText(p.text).width;
+        } else {
+          p.w = this._iconWidth(p.icon, p.h);
+        }
+      }
+      const total = pad * 2 + parts.reduce((acc, p) => acc + p.w, 0) + gap * (parts.length - 1);
       const x = W - 10 * s - total;
+      const rowH = 28 * s;
       const involved = info.focus >= 0 && (k.attacker === info.focus || k.victim === info.focus);
       const alpha = Math.min(1, (window - (tick - k.tick)) / rate);
       c.globalAlpha = Math.max(0, alpha);
-      this._panel(x, y, total, 26 * s, 5 * s, 'rgba(10,12,15,0.78)', involved ? '#e5484d' : null);
+      this._panel(x, y, total, rowH, 5 * s, involved ? 'rgba(40,10,12,0.82)' : 'rgba(10,12,15,0.78)', involved ? '#e5484d' : null);
       let cx = x + pad;
-      if (a) {
-        this._text(a, cx, y + 13 * s, size, COLORS[k.attackerSide || 'T']);
-        cx += wa + gap;
+      const cy = y + rowH / 2;
+      for (const p of parts) {
+        if (p.text !== undefined) this._text(p.text, cx, cy, p.size, p.color, 'left', p.weight);
+        else this._icon(p.icon, cx, cy, p.h, p.color);
+        cx += p.w + gap;
       }
-      this._text(w + (marks ? '  ' + marks : ''), cx, y + 13 * s, 12 * s, '#d5d9e0', 'left', 500);
-      cx += ww + gap;
-      this._text(v, cx, y + 13 * s, size, COLORS[k.victimSide || 'CT']);
       c.globalAlpha = 1;
-      y += 30 * s;
+      y += rowH + 4 * s;
     }
   }
 
@@ -160,6 +229,14 @@ export class Hud {
     const weapon = st.alive ? st.weapon : 'мёртв';
     this._panel(W - 202 * s, y, 190 * s, 40 * s, 6 * s, 'rgba(10,12,15,0.72)');
     this._text(weapon, W - 192 * s, y + 13 * s, 14 * s, '#e7e9ee');
+    const wKey = st.alive ? weaponIcon(st.weapon) : null;
+    if (wKey) {
+      // Weapon silhouette above the panel, at most 110px wide.
+      let ih = 24 * s;
+      const maxW = 110 * s;
+      if (this._iconWidth(wKey, ih) > maxW) ih *= maxW / this._iconWidth(wKey, ih);
+      this._icon(wKey, W - 16 * s - this._iconWidth(wKey, ih), y - 8 * s - ih / 2, ih, 'rgba(255,255,255,0.92)');
+    }
     this._text('$' + st.money.toLocaleString('en-US'), W - 192 * s, y + 29 * s, 12 * s, '#8fd18f', 'left', 600);
     if (st.defuser) this._text('кусачки', W - 22 * s, y + 29 * s, 11 * s, '#8b93a1', 'right', 500);
 

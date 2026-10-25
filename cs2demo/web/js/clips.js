@@ -5,6 +5,7 @@
 //  * or, where WebCodecs is missing, in real time with MediaRecorder (WebM),
 //  * or by the headless renderer (Python + Chromium), via window.cs2render.
 import { Muxer, ArrayBufferTarget } from '../vendor/mp4-muxer.mjs';
+import { encodeWav, renderClipAudio } from './audio.js';
 
 export const POV_TO_MODE = { first: 'pov', third: 'chase', overview: 'overview' };
 export const POV_LABELS = { first: 'От первого лица', third: 'Из-за спины', overview: 'Сверху (следить)' };
@@ -33,7 +34,7 @@ export class ClipDirector {
     this.viewer = viewer;
     this.h = highlight;
     this.opts = {
-      pov: 'first', fps: 30, slowmo: false, hud: true, width: 1280, height: 720, ...opts,
+      pov: 'first', fps: 30, slowmo: false, hud: true, sound: true, width: 1280, height: 720, ...opts,
     };
     this.opts.width -= this.opts.width % 2;
     this.opts.height -= this.opts.height % 2;
@@ -87,12 +88,19 @@ export class ClipDirector {
 
   get fileName() { return `${this.h.id}-${this.opts.pov}`; }
 
+  /** The clip's soundtrack (AudioBuffer) or null when sound is off / unsupported. */
+  async audio() {
+    if (!this.opts.sound || typeof OfflineAudioContext === 'undefined') return null;
+    if (!this._audio) this._audio = await renderClipAudio(this.viewer.demo, this.ticks, this.opts.fps, this.h.player);
+    return this._audio;
+  }
+
   get info() {
     const h = this.h, o = this.opts;
     return {
       highlight: h.id, title: h.title, player: h.playerName, round: h.round, score: h.score,
       tags: h.tags, pov: o.pov, width: o.width, height: o.height, fps: o.fps,
-      duration: +(this.count / o.fps).toFixed(2), codec: this.codec || null,
+      duration: +(this.count / o.fps).toFixed(2), codec: this.codec || null, audioCodec: this.audioCodec || null,
     };
   }
 }
@@ -125,6 +133,46 @@ export async function webCodecsSupported(width = 1280, height = 720, fps = 30) {
   return !!(await pickEncoderConfig(width, height, fps));
 }
 
+// AAC where the browser can encode it (Windows / macOS Chrome), Opus otherwise
+// (the server converts Opus to AAC when saving the clip).
+async function pickAudioConfig(sampleRate, channels) {
+  if (typeof AudioEncoder === 'undefined') return null;
+  for (const [codec, mux] of [['mp4a.40.2', 'aac'], ['opus', 'opus']]) {
+    const config = { codec, sampleRate, numberOfChannels: channels, bitrate: 160000 };
+    try {
+      const { supported } = await AudioEncoder.isConfigSupported(config);
+      if (supported) return { config, mux };
+    } catch (_) { /* try next */ }
+  }
+  return null;
+}
+
+async function encodeAudio(buffer, muxer, picked) {
+  let failure = null;
+  const enc = new AudioEncoder({
+    output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+    error: (e) => { failure = e; },
+  });
+  enc.configure(picked.config);
+  const ch = buffer.numberOfChannels, sr = buffer.sampleRate, block = 4800;
+  const chans = Array.from({ length: ch }, (_, c) => buffer.getChannelData(c));
+  for (let start = 0; start < buffer.length; start += block) {
+    const n = Math.min(block, buffer.length - start);
+    const planar = new Float32Array(n * ch);
+    for (let c = 0; c < ch; c++) planar.set(chans[c].subarray(start, start + n), c * n);
+    const data = new AudioData({
+      format: 'f32-planar', sampleRate: sr, numberOfFrames: n, numberOfChannels: ch,
+      timestamp: Math.round((start / sr) * 1e6), data: planar,
+    });
+    enc.encode(data);
+    data.close();
+    if (failure) throw failure;
+  }
+  await enc.flush();
+  enc.close();
+  if (failure) throw failure;
+}
+
 /** Frame-exact export to MP4 with WebCodecs. Returns a Blob. */
 export async function exportMp4(director, { onProgress, signal } = {}) {
   const { width, height, fps } = director.opts;
@@ -132,11 +180,18 @@ export async function exportMp4(director, { onProgress, signal } = {}) {
   if (!picked) throw new Error('WebCodecs недоступен');
   const { config, mux } = picked;
   director.codec = mux;
+  onProgress?.(0);
+  const sound = await director.audio();
+  const audioPick = sound ? await pickAudioConfig(sound.sampleRate, sound.numberOfChannels) : null;
+  director.audioCodec = audioPick ? audioPick.mux : null;
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
     video: { codec: mux, width, height, frameRate: fps },
+    audio: audioPick ? { codec: audioPick.mux, sampleRate: sound.sampleRate, numberOfChannels: sound.numberOfChannels } : undefined,
     fastStart: 'in-memory',
+    firstTimestampBehavior: 'offset',
   });
+  if (audioPick) await encodeAudio(sound, muxer, audioPick);
   let failure = null;
   const encoder = new VideoEncoder({
     output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
@@ -181,8 +236,18 @@ export async function exportRealtime(director, { onProgress, signal } = {}) {
   if (!window.MediaRecorder) throw new Error('Браузер не умеет записывать видео (нет MediaRecorder)');
   const { fps, width, height } = director.opts;
   const mime = recorderMime();
+  const sound = await director.audio();
   director.start();
   const stream = director.canvas.captureStream(fps);
+  let audioCtx = null, audioSrc = null;
+  if (sound) {
+    audioCtx = new AudioContext({ sampleRate: sound.sampleRate });
+    const dest = audioCtx.createMediaStreamDestination();
+    audioSrc = audioCtx.createBufferSource();
+    audioSrc.buffer = sound;
+    audioSrc.connect(dest);
+    dest.stream.getAudioTracks().forEach((t) => stream.addTrack(t));
+  }
   const rec = new MediaRecorder(stream, {
     mimeType: mime || undefined,
     videoBitsPerSecond: Math.round(Math.min(25e6, width * height * fps * 0.12)),
@@ -193,6 +258,7 @@ export async function exportRealtime(director, { onProgress, signal } = {}) {
   try {
     director.render(0);
     rec.start(500);
+    if (audioSrc) audioSrc.start();
     const t0 = performance.now();
     const n = director.count;
     for (;;) {
@@ -207,6 +273,7 @@ export async function exportRealtime(director, { onProgress, signal } = {}) {
     if (rec.state !== 'inactive') rec.stop();
     await stopped;
     stream.getTracks().forEach((t) => t.stop());
+    if (audioCtx) audioCtx.close();
     director.finish();
   }
   onProgress?.(1);
@@ -257,6 +324,15 @@ export function installRenderApi(viewer, getDemo) {
       const q = director.opts.quality ?? 0.9;
       for (let i = a; i < b; i++) out.push(director.render(i).toDataURL('image/jpeg', q));
       return out;
+    },
+    /** The current clip's soundtrack as a base64 WAV (null when sound is off). */
+    async audio() {
+      const buf = director ? await director.audio() : null;
+      if (!buf) return null;
+      const bytes = new Uint8Array(encodeWav(buf));
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      return btoa(bin);
     },
     end() {
       if (director) director.finish();

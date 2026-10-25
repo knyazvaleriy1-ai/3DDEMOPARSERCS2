@@ -277,7 +277,19 @@ def parse_demo(
     df = df[df["team_num"].isin([2, 3])]
     keys = [_player_key(s, n) for s, n in zip(df["steamid"].tolist(), df["name"].tolist(), strict=True)]
     df = df.assign(_key=keys)
-    alive_keys = set(df.loc[df["is_alive"].astype(bool), "_key"].unique())
+    alive = df["is_alive"].astype(bool)
+    # Coaches and casters can be "alive" during warmup only: count life after match start.
+    match_starts = [int(t) for t in events["begin_new_match"]["tick"]] if "begin_new_match" in events else []
+    if match_starts:
+        after = alive & (df["tick"] > max(match_starts))
+        if after.any():
+            alive = after
+    # ...and some coach slots sit "alive" in one spot (teleported between halves)
+    # for the whole match: require real walking, not just one jump.
+    alive_rows = df.loc[alive, ["_key", "tick", "X", "Y"]].sort_values(["_key", "tick"])
+    step_len = np.hypot(alive_rows.groupby("_key")["X"].diff(), alive_rows.groupby("_key")["Y"].diff())
+    walking = ((step_len > 0.5) & (step_len < 200)).groupby(alive_rows["_key"]).sum()
+    alive_keys = set(walking.index[walking >= 20])
     df = df[df["_key"].isin(alive_keys)]
     if len(df) == 0:
         raise DemoParseError("В демо не найдено живых игроков")
