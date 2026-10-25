@@ -29,6 +29,37 @@ WEB_DIR = Path(__file__).parent / "web"
 _meta_lock = threading.Lock()
 
 
+class MontageRequest(BaseModel):
+    clips: list[dict[str, str]]  # [{"demo": id, "file": name.mp4}], in playback order
+    title: str = "CS2 хайлайты"
+
+
+def _montage_job(paths: list[Path], title: str, base_url: str, progress=None) -> dict[str, Any]:
+    import tempfile
+    import time
+
+    from .montage import concat, intro_card
+
+    progress = progress or (lambda f, m: None)
+    out = storage.clips_dir("montages") / f"montage-{time.strftime('%Y%m%d-%H%M%S')}.mp4"
+    with tempfile.TemporaryDirectory() as tmp:
+        card = None
+        if playwright_available():
+            progress(0.1, "Титульная карточка")
+            try:
+                from .montage import _size
+
+                width, height = _size(media.ffmpeg_exe(), paths[0])
+                card = intro_card(Path(tmp) / "intro.jpg", width, height, title, [f"{len(paths)} моментов"], base_url)
+            except Exception as exc:  # noqa: BLE001 - the card is optional
+                log.warning("intro card failed: %s", exc)
+        progress(0.3, "Склейка")
+        concat(paths, out, intro=card)
+    record = {"title": title, "montage": True, "clips": [p.name for p in paths], "source": "montage"}
+    media.write_sidecar(out, record)
+    return {**record, "file": out.name, "url": f"/clips/montages/{out.name}"}
+
+
 class HighlightOptions(BaseModel):
     pre: float | None = None
     post: float | None = None
@@ -375,6 +406,28 @@ def create_app() -> FastAPI:
             detail=req.quality if req.quality in ("auto", "low", "high") else "auto",
         )
         return {"job": key, "clips": [h["id"] for h in chosen]}
+
+    @app.post("/api/montage")
+    def montage(req: MontageRequest, request: Request) -> dict[str, Any]:
+        """Join already recorded clips into one video (intro card + fades)."""
+        if not media.ffmpeg_exe():
+            raise HTTPException(501, "Нужен ffmpeg")
+        paths = []
+        for c in req.clips:
+            demo, name = c.get("demo", ""), c.get("file", "")
+            if not storage.is_valid_id(demo) or not storage.is_valid_id(name) or Path(name).suffix not in media.VIDEO_EXTS:
+                raise HTTPException(400, f"Некорректный клип: {demo}/{name}")
+            path = storage.clips_dir() / demo / name
+            if not path.is_file():
+                raise HTTPException(404, f"Нет клипа {demo}/{name}")
+            paths.append(path)
+        if len(paths) < 2:
+            raise HTTPException(400, "Выберите хотя бы два клипа")
+        current = jobs.get("montage")
+        if current and current.get("status") in ("queued", "rendering"):
+            raise HTTPException(409, "Нарезка уже собирается")
+        jobs.submit_render("montage", _montage_job, paths, req.title.strip()[:60] or "CS2 хайлайты", str(request.base_url))
+        return {"job": "montage", "clips": len(paths)}
 
     @app.get("/api/jobs/{key}")
     def job(key: str) -> dict[str, Any]:

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>card</title>
+  <style>html, body { margin: 0; background: #0d0f12; overflow: hidden; } canvas { display: block; }</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// Title card for highlight montages (rendered by cs2demo/montage.py).
+window.drawCard = (title, lines) => {
+  const W = window.innerWidth, H = window.innerHeight, s = H / 720;
+  const c = document.getElementById('c');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  const bg = g.createLinearGradient(0, 0, W, H);
+  bg.addColorStop(0, '#191d24'); bg.addColorStop(1, '#0b0c0f');
+  g.fillStyle = bg; g.fillRect(0, 0, W, H);
+  // diagonal stripes
+  g.save(); g.globalAlpha = 0.05; g.strokeStyle = '#ffffff'; g.lineWidth = 40 * s;
+  for (let x = -H; x < W + H; x += 140 * s) { g.beginPath(); g.moveTo(x, H); g.lineTo(x + H, 0); g.stroke(); }
+  g.restore();
+  const font = '"Segoe UI", system-ui, Roboto, Arial, sans-serif';
+  const x = 90 * s;
+  let y = H * 0.38;
+  g.fillStyle = '#f0a020'; g.fillRect(x - 26 * s, y - 70 * s, 10 * s, 150 * s);
+  g.fillStyle = '#f0a020';
+  g.font = `800 ${22 * s}px ${font}`;
+  g.fillText('CS2 3D DEMO VIEWER', x, y - 44 * s);
+  g.fillStyle = '#ffffff';
+  g.font = `800 ${70 * s}px ${font}`;
+  g.fillText(title, x, y + 30 * s);
+  y += 95 * s;
+  g.font = `500 ${26 * s}px ${font}`;
+  for (const line of lines) {
+    g.fillStyle = '#c9cfda';
+    g.fillText(line, x, y);
+    y += 40 * s;
+  }
+  return c.toDataURL('image/jpeg', 0.95);
+};
+</script>
+</body>
+</html>

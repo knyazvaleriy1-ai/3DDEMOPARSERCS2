@@ -139,6 +139,23 @@ Ancient, Anubis, Train, Cache, Office, Italy (`web/js/palettes.js`) — цвет
 **«Рендер на сервере»** делает то же самое в фоновом headless-браузере — можно
 закрыть вкладку. Нужен Playwright (`python -m playwright install chromium`).
 
+### Нарезка (монтаж)
+
+`python -m cs2demo montage` берёт одно или несколько демо, выбирает лучшие
+моменты по очкам (`--top 10`), рендерит их и склеивает в один MP4: титульная
+карточка с названиями матчей, обратный отсчёт «#10 → #1» (лучший момент в
+конце), команды и раунд в углу кадра, плавные переходы, звук. Клатч 1v5
+автоматически получает максимум очков; `--include clutch1v5,ace` гарантирует,
+что такие моменты попадут в нарезку, `--per-demo 3` ограничивает число моментов
+из одного матча, `--jobs 2` рендерит два клипа параллельно. Готовый файл — в
+`data/clips/montages/`.
+
+В веб-интерфейсе: вкладка «Клипы» → отметьте готовые клипы в нужном порядке →
+**«Склеить в нарезку»**.
+
+Про-демо скачиваются со страницы матча на [HLTV](https://www.hltv.org/results)
+(кнопка GOTV Demo, архив `.rar` с `.dem` каждой карты).
+
 Как считаются очки: база за число киллов (2K — 22, 3K — 45, 4K — 70, ACE — 100),
 + хедшоты, ноускоп (+14), прострел (+8), через дым (+8), вслепую (+12), в прыжке
 (+8…12), нож (+20), зевс (+15), дальний килл (+4), быстрая серия (+8/+15),
@@ -155,6 +172,7 @@ python -m cs2demo highlights match.dem --top 10         # найденные х�
 python -m cs2demo render match.dem --top 5 --pov first --res 1920x1080 --fps 60 --slowmo
 python -m cs2demo render <id> --clips r05-player-3k,r12-player-clutch1v3
 python -m cs2demo watch "C:\...\game\csgo\replays" --render --top 5   # автозапись новых матчей
+python -m cs2demo montage match1.dem match2.dem --top 10 --slowmo --include clutch1v5   # нарезка в один MP4
 python -m cs2demo maps de_mirage de_inferno             # заранее скачать карты (без аргументов — все)
 ```
 
@@ -183,6 +201,7 @@ cs2demo/
   maps.py        загрузка геометрии/радаров карт из awpy-data (HTTP Range: только нужная карта)
   server.py      FastAPI: библиотека демо, данные, карты, клипы, фоновый рендер
   recorder.py    headless-рендер клипов: Chromium (Playwright) → JPEG-кадры → ffmpeg → MP4
+  montage.py     нарезка: выбор лучших моментов нескольких демо, рендер, склейка
   cli.py         команды serve / parse / list / highlights / render / watch / maps
   models.py      модель игрока: загрузка по умолчанию и пользовательские замены
   web/           просмотрщик (Three.js, без сборки)

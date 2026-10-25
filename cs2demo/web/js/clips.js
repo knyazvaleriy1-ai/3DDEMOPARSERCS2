@@ -58,7 +58,7 @@ export class ClipDirector {
     v.setFixedSize({ width: this.opts.width, height: this.opts.height });
     v.tick = this.ticks[0];
     v.setMode(POV_TO_MODE[this.opts.pov] || 'pov', this.h.player);
-    v.clip = this.opts.hud ? this.h : null;
+    v.clip = this.opts.hud ? { ...this.h, badge: this.opts.badge || null, match: this.opts.match || null } : null;
     this.started = true;
   }
 

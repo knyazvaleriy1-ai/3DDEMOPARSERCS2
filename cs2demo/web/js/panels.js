@@ -375,9 +375,18 @@ export class ClipsPanel {
     this.el = el;
     this.app = app;
     this.all = false;
+    this.picked = [];
+    el.addEventListener('change', (e) => {
+      if (!e.target.matches('[data-pick]')) return;
+      const key = e.target.dataset.pick;
+      this.picked = this.picked.filter((k) => k !== key);
+      if (e.target.checked) this.picked.push(key);
+      this._pickLabel();
+    });
     el.addEventListener('click', async (e) => {
       const btn = e.target.closest('[data-act]');
       if (!btn) return;
+      if (btn.dataset.act === 'montage') { this.montage(); return; }
       if (btn.dataset.act === 'toggle-all') { this.all = !this.all; this.refresh(); return; }
       if (btn.dataset.act === 'refresh') { this.refresh(); return; }
       if (btn.dataset.act === 'delete') {
@@ -401,7 +410,9 @@ export class ClipsPanel {
     document.getElementById('clip-count').textContent = clips.length || '';
     const head = `<div class="btn-row" style="margin:0 0 10px">
       <button class="btn small" data-act="refresh">Обновить</button>
-      <button class="btn small" data-act="toggle-all">${this.all ? 'Только это демо' : 'Клипы всех демо'}</button></div>`;
+      <button class="btn small" data-act="toggle-all">${this.all ? 'Только это демо' : 'Клипы всех демо'}</button>
+      <button class="btn small primary" data-act="montage" title="Отметьте клипы в нужном порядке">Склеить в нарезку</button></div>
+      <div class="status-line" id="montage-status"></div>`;
     if (!clips.length) {
       this.el.innerHTML = head + '<p class="muted">Клипов пока нет. Откройте «Хайлайты», отметьте моменты и нажмите «Записать».</p>';
       return;
@@ -410,7 +421,8 @@ export class ClipsPanel {
       <div class="clip">
         <video src="${esc(c.url)}" controls preload="metadata" playsinline></video>
         <div class="clip-body">
-          <div class="title">${esc(c.title || c.file)}</div>
+          <label class="check title"><input type="checkbox" data-pick="${esc(c.demo)}/${esc(c.file)}"
+            ${this.picked.includes(`${c.demo}/${c.file}`) ? 'checked' : ''}> ${esc(c.title || c.file)}</label>
           <div class="muted small">${esc([c.pov && POV_LABELS[c.pov], c.width && `${c.width}×${c.height}`, c.fps && `${c.fps} fps`,
             c.duration && `${c.duration} с`, fmtBytes(c.size)].filter(Boolean).join(' · '))}</div>
           <div class="btn-row">
@@ -421,6 +433,39 @@ export class ClipsPanel {
       </div>`).join('');
   }
 }
+
+Object.assign(ClipsPanel.prototype, {
+  _pickLabel() {
+    const st = this.el.querySelector('#montage-status');
+    if (st) st.textContent = this.picked.length ? `В нарезке: ${this.picked.length} (в порядке отметки)` : '';
+  },
+
+  async montage() {
+    if (this.picked.length < 2) { toast('Отметьте хотя бы два клипа — в том порядке, в каком их склеить'); return; }
+    const title = prompt('Заголовок нарезки', 'CS2 хайлайты');
+    if (title === null) return;
+    const clips = this.picked.map((k) => { const [demo, file] = k.split('/'); return { demo, file }; });
+    const st = this.el.querySelector('#montage-status');
+    try {
+      await fetchJSON('/api/montage', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clips, title }),
+      });
+    } catch (err) { toast(err.message, 'error', 6000); return; }
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1500));
+      let job;
+      try { job = await fetchJSON('/api/jobs/montage'); } catch (_) { return; }
+      if (st) st.textContent = `Нарезка: ${job.message || job.status}`;
+      if (job.status === 'done' || job.status === 'error') {
+        toast(job.status === 'done' ? 'Нарезка готова (Клипы всех демо → montages)' : job.message, job.status === 'done' ? 'info' : 'error', 6000);
+        this.picked = [];
+        this.all = true;
+        this.refresh();
+        return;
+      }
+    }
+  },
+});
 
 // -- View settings ---------------------------------------------------------------------
 

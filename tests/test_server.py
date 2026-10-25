@@ -102,3 +102,9 @@ def test_models_and_sounds(client, data_dir):
     (sounds / "readme.txt").write_text("ignored")
     listed = client.get("/api/sounds").json()
     assert listed == [{"name": "ak47", "file": "ak47.wav", "url": "/sounds/ak47.wav"}]
+
+
+def test_montage_validation(client, parsed_demo):
+    assert client.post("/api/montage", json={"clips": [{"demo": parsed_demo, "file": "x.mp4"}]}).status_code in (400, 404)
+    bad = client.post("/api/montage", json={"clips": [{"demo": "../etc", "file": "a.mp4"}, {"demo": "x", "file": "b.mp4"}]})
+    assert bad.status_code == 400

@@ -302,14 +302,14 @@ export class Hud {
     const c = this.ctx;
     // watermark
     c.globalAlpha = 0.75;
-    this._text(`${demo.meta.map} · раунд ${clip.round} · ${clip.playerName}`, 14 * s, 18 * s, 12 * s, '#d5d9e0', 'left', 500);
+    this._text(`${clip.match || demo.meta.map} · раунд ${clip.round} · ${clip.playerName}`, 14 * s, 18 * s, 12 * s, '#d5d9e0', 'left', 500);
     c.globalAlpha = 1;
     if (age < 0 || age > 3.5) return;
     const alpha = Math.min(1, age / 0.3, (3.5 - age) / 0.5);
     c.globalAlpha = Math.max(0, alpha);
     const y = H * 0.74;
     c.font = `800 ${30 * s}px ${FONT}`;
-    const title = clip.label ? `${clip.label} — ${clip.playerName}` : clip.title;
+    const title = (clip.badge ? `${clip.badge}  ` : '') + (clip.label ? `${clip.label} — ${clip.playerName}` : clip.title);
     const tw = c.measureText(title).width;
     const tags = (clip.tags || []).slice(0, 5).join('  ·  ');
     c.font = `500 ${14 * s}px ${FONT}`;

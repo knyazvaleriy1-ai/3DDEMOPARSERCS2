@@ -83,6 +83,9 @@ def render_highlights(
     sound: bool = True,
     quality: float = 0.9,
     detail: str = "auto",
+    badge: str | None = None,
+    match: str | None = None,
+    suffix: str = "",
     progress: ProgressFn | None = None,
 ) -> list[dict[str, Any]]:
     """Render ``highlights`` of ``demo_id`` to MP4 files; returns clip records."""
@@ -132,16 +135,17 @@ def render_highlights(
 
             total = len(highlights)
             for n, h in enumerate(highlights):
-                opts = {"pov": pov, "fps": fps, "slowmo": slowmo, "hud": hud, "sound": sound, "quality": quality}
+                opts = {"pov": pov, "fps": fps, "slowmo": slowmo, "hud": hud, "sound": sound, "quality": quality,
+                        "badge": badge, "match": match}
                 info = page.evaluate("([id, opts]) => window.cs2render.begin(id, opts)", [h["id"], opts])
                 frames = int(info["frames"])
-                dest = out_dir / f"{h['id']}-{pov}.mp4"
+                dest = out_dir / f"{h['id']}-{pov}{suffix}.mp4"
                 wav = None
                 if sound:
                     progress((n + 0.01) / total, f"Клип {n + 1}/{total}: звук")
                     data = page.evaluate("() => window.cs2render.audio()")
                     if data:
-                        wav = out_dir / f".{h['id']}-{pov}.wav"
+                        wav = out_dir / f".{h['id']}-{pov}{suffix}.wav"
                         wav.write_bytes(base64.b64decode(data))
                 encoder = FrameEncoder(dest, fps, audio=wav)
                 started = time.time()

@@ -173,6 +173,29 @@ def cmd_watch(args: argparse.Namespace) -> None:
         time.sleep(args.interval)
 
 
+def cmd_montage(args: argparse.Namespace) -> None:
+    """Best moments of several demos cut into one video."""
+    from .montage import make_montage
+    from .recorder import playwright_available
+
+    if not playwright_available():
+        raise SystemExit("Нужен Playwright: pip install playwright && python -m playwright install chromium")
+    demo_ids = [_resolve_demo(d) for d in args.demos]
+    include = [c.strip() for c in args.include.split(",") if c.strip()] if args.include else None
+    result = make_montage(
+        demo_ids, Path(args.out) if args.out else None, top=args.top, include=include,
+        min_score=args.min_score, per_demo=args.per_demo, title=args.title, jobs=args.jobs,
+        progress=_render_progress, **_render_opts(args),
+    )
+    print(f"\nНарезка: {result['path']} ({result['duration']} с, {len(result['clips'])} моментов)")
+    for i, c in enumerate(reversed(result["clips"]), 1):
+        print(f"  #{i:<2} {c['title']}  ({c['score']} очк.)")
+
+
+def _render_progress(fraction: float, message: str) -> None:
+    print(f"\r[{fraction * 100:5.1f}%] {message[:110]:<110}", end="", flush=True)
+
+
 def cmd_maps(args: argparse.Namespace) -> None:
     from . import maps, models
 
@@ -245,6 +268,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--interval", type=float, default=10.0)
     _add_render_args(p)
     p.set_defaults(func=cmd_watch, top=5)
+
+    p = sub.add_parser("montage", help="нарезка лучших моментов одного или нескольких демо в одно видео")
+    p.add_argument("demos", nargs="+", help="id демо или пути к .dem")
+    p.add_argument("--include", help="обязательно включить: подстроки id через запятую, например clutch1v5")
+    p.add_argument("--per-demo", type=int, help="не больше N моментов из одного демо")
+    p.add_argument("--title", default="CS2 хайлайты", help="заголовок титульной карточки")
+    p.add_argument("--out", help="файл MP4 (по умолчанию data/clips/montages/)")
+    p.add_argument("--jobs", type=int, default=1, help="сколько клипов рендерить параллельно")
+    _add_render_args(p)
+    p.set_defaults(func=cmd_montage, top=10)
 
     p = sub.add_parser("maps", help="заранее скачать 3D-геометрию и радары карт и модель игрока")
     p.add_argument("names", nargs="*", help="например de_mirage de_inferno (по умолчанию все)")
