@@ -1,0 +1,249 @@
+// 2D overlay drawn on a canvas: score/timer, killfeed, first-person HUD,
+// flashbang/scope overlays and clip title cards. The same canvas is
+// composited into recorded clips, so everything visible here ends up in them.
+import { COLORS, fmtTime, weaponName } from './util.js';
+
+const FONT = '"Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif';
+const ROUND_SECONDS = 115;
+const BOMB_SECONDS = 40;
+
+export class Hud {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.options = { killfeed: true, scorebar: true };
+  }
+
+  resize(w, h) {
+    if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.canvas.width = w;
+      this.canvas.height = h;
+    }
+  }
+
+  draw(info) {
+    const c = this.ctx;
+    const W = this.canvas.width, H = this.canvas.height;
+    c.clearRect(0, 0, W, H);
+    if (!info || !info.demo) return;
+    const s = Math.max(0.5, H / 720);
+    this.s = s;
+
+    if (info.pov && info.povState && info.povState.alive) {
+      if (info.povState.scoped && /awp|ssg|scar|g3sg1|sg 553|aug/i.test(info.povState.weapon)) this._scope(W, H, s);
+      else this._crosshair(W, H, s);
+    }
+    if (info.blind > 0.01) {
+      c.fillStyle = `rgba(255,255,255,${Math.min(1, info.blind)})`;
+      c.fillRect(0, 0, W, H);
+    }
+    if (this.options.scorebar) this._scorebar(info, W, s);
+    if (this.options.killfeed) this._killfeed(info, W, s);
+    if (info.pov && info.povState && info.povState.present) this._povHud(info, W, H, s);
+    if (info.clip) this._clipCard(info, W, H, s);
+  }
+
+  _text(str, x, y, size, color, align = 'left', weight = 600) {
+    const c = this.ctx;
+    c.font = `${weight} ${size}px ${FONT}`;
+    c.textAlign = align;
+    c.textBaseline = 'middle';
+    c.fillStyle = color;
+    c.fillText(str, x, y);
+    return c.measureText(str).width;
+  }
+
+  _panel(x, y, w, h, r, fill, stroke) {
+    const c = this.ctx;
+    c.beginPath();
+    c.roundRect(x, y, w, h, r);
+    c.fillStyle = fill;
+    c.fill();
+    if (stroke) { c.strokeStyle = stroke; c.lineWidth = Math.max(1, 1.5 * this.s); c.stroke(); }
+  }
+
+  _scorebar(info, W, s) {
+    const { demo, tick, round, score, alive, bomb } = info;
+    if (!round) return;
+    const rate = demo.tickRate;
+    const w = 300 * s, h = 46 * s, x = W / 2 - w / 2, y = 8 * s;
+    this._panel(x, y, w, h, 8 * s, 'rgba(10,12,15,0.78)');
+    // Scores
+    this._panel(x, y, 70 * s, h, 8 * s, 'rgba(232,163,61,0.22)');
+    this._panel(x + w - 70 * s, y, 70 * s, h, 8 * s, 'rgba(90,160,230,0.22)');
+    this._text(String(score.T), x + 35 * s, y + h / 2, 24 * s, COLORS.T, 'center', 700);
+    this._text(String(score.CT), x + w - 35 * s, y + h / 2, 24 * s, COLORS.CT, 'center', 700);
+    // Alive pips
+    for (const [side, x0, dir] of [['T', x + 76 * s, 1], ['CT', x + w - 76 * s, -1]]) {
+      const n = alive[side] || 0;
+      this._text(`${n}`, x0 + dir * 4 * s, y + h - 9 * s, 11 * s, COLORS[side], dir > 0 ? 'left' : 'right', 600);
+    }
+    // Clock
+    let clock, color = '#e7e9ee';
+    if (bomb && bomb.state === 'planted') {
+      const left = BOMB_SECONDS - (tick - bomb.plantTick) / rate;
+      clock = `C4 ${fmtTime(Math.max(0, left))}`;
+      color = '#ff6b6e';
+    } else if (bomb && bomb.state === 'defused' && tick >= bomb.endTick) {
+      clock = 'Разминир.'; color = COLORS.CT;
+    } else if (tick > round.end && round.winner) {
+      clock = `Победа ${round.winner}`;
+      color = COLORS[round.winner];
+    } else if (tick < round.freezeEnd) {
+      clock = `Закупка ${fmtTime((round.freezeEnd - tick) / rate)}`;
+      color = '#9aa3ad';
+    } else {
+      clock = fmtTime(ROUND_SECONDS - (tick - round.freezeEnd) / rate);
+    }
+    this._text(clock, W / 2, y + 18 * s, 18 * s, color, 'center', 700);
+    this._text(`Раунд ${round.num}`, W / 2, y + 36 * s, 11 * s, '#8b93a1', 'center', 500);
+  }
+
+  _killfeed(info, W, s) {
+    const { demo, tick, roundStart } = info;
+    const rate = demo.tickRate;
+    const window = 6 * rate;
+    const kills = demo.killsBetween(Math.max(roundStart ?? 0, tick - window), tick).slice(-6);
+    let y = 10 * s;
+    const c = this.ctx;
+    for (const k of kills) {
+      const a = k.attacker >= 0 ? demo.players[k.attacker].name : '';
+      const v = demo.players[k.victim].name;
+      const w = weaponName(k.weapon);
+      const marks = [k.blind && 'ослепл.', k.noscope && 'NS', k.smoke && 'дым', k.penetrated && 'WB', k.headshot && 'HS']
+        .filter(Boolean).join(' ');
+      const size = 14 * s;
+      c.font = `600 ${size}px ${FONT}`;
+      const wa = a ? c.measureText(a).width : 0;
+      const wv = c.measureText(v).width;
+      c.font = `500 ${12 * s}px ${FONT}`;
+      const ww = c.measureText(w + (marks ? '  ' + marks : '')).width;
+      const pad = 10 * s, gap = 10 * s;
+      const total = pad * 2 + wa + (a ? gap : 0) + ww + gap + wv;
+      const x = W - 10 * s - total;
+      const involved = info.focus >= 0 && (k.attacker === info.focus || k.victim === info.focus);
+      const alpha = Math.min(1, (window - (tick - k.tick)) / rate);
+      c.globalAlpha = Math.max(0, alpha);
+      this._panel(x, y, total, 26 * s, 5 * s, 'rgba(10,12,15,0.78)', involved ? '#e5484d' : null);
+      let cx = x + pad;
+      if (a) {
+        this._text(a, cx, y + 13 * s, size, COLORS[k.attackerSide || 'T']);
+        cx += wa + gap;
+      }
+      this._text(w + (marks ? '  ' + marks : ''), cx, y + 13 * s, 12 * s, '#d5d9e0', 'left', 500);
+      cx += ww + gap;
+      this._text(v, cx, y + 13 * s, size, COLORS[k.victimSide || 'CT']);
+      c.globalAlpha = 1;
+      y += 30 * s;
+    }
+  }
+
+  _povHud(info, W, H, s) {
+    const st = info.povState;
+    const name = info.demo.players[info.povPlayer]?.name || '';
+    const side = st.side;
+    const y = H - 52 * s;
+    // health / armor
+    this._panel(12 * s, y, 190 * s, 40 * s, 6 * s, 'rgba(10,12,15,0.72)');
+    this._text('HP', 22 * s, y + 20 * s, 12 * s, '#8b93a1');
+    this._text(String(st.alive ? st.hp : 0), 46 * s, y + 20 * s, 24 * s, st.hp > 30 ? '#e7e9ee' : '#ff6b6e', 'left', 700);
+    this._text(st.helmet ? 'Броня+шлем' : 'Броня', 100 * s, y + 13 * s, 10 * s, '#8b93a1');
+    this._text(String(st.armor), 100 * s, y + 28 * s, 16 * s, '#e7e9ee', 'left', 700);
+    // name + place
+    const label = `${name}${st.place ? '  ·  ' + st.place : ''}`;
+    const c = this.ctx;
+    c.font = `600 ${15 * s}px ${FONT}`;
+    const lw = c.measureText(label).width + 24 * s;
+    this._panel(W / 2 - lw / 2, y + 4 * s, lw, 32 * s, 6 * s, 'rgba(10,12,15,0.72)', COLORS[side]);
+    this._text(label, W / 2, y + 20 * s, 15 * s, COLORS[side], 'center');
+    // weapon + money
+    const weapon = st.alive ? st.weapon : 'мёртв';
+    this._panel(W - 202 * s, y, 190 * s, 40 * s, 6 * s, 'rgba(10,12,15,0.72)');
+    this._text(weapon, W - 192 * s, y + 13 * s, 14 * s, '#e7e9ee');
+    this._text('$' + st.money.toLocaleString('en-US'), W - 192 * s, y + 29 * s, 12 * s, '#8fd18f', 'left', 600);
+    if (st.defuser) this._text('кусачки', W - 22 * s, y + 29 * s, 11 * s, '#8b93a1', 'right', 500);
+
+    // multi-kill banner for the POV player's kills in this round
+    const rate = info.demo.tickRate;
+    let count = 0, lastTick = -1;
+    for (const k of info.demo.killsBetween(info.roundStart ?? 0, info.tick)) {
+      if (k.attacker === info.povPlayer && !k.teamkill && k.victim !== k.attacker) { count++; lastTick = k.tick; }
+    }
+    if (count > 0 && info.tick - lastTick < 1.4 * rate) {
+      const age = (info.tick - lastTick) / rate;
+      const text = count >= 5 ? 'ACE' : count === 1 ? '+1' : `${count}K`;
+      c.globalAlpha = Math.min(1, (1.4 - age) / 0.4);
+      const size = (34 + 10 * Math.max(0, 1 - age * 5)) * s;
+      this._text(text, W / 2, H * 0.68, size, count >= 3 ? '#ffd34d' : '#ffffff', 'center', 800);
+      c.globalAlpha = 1;
+    }
+  }
+
+  _crosshair(W, H, s) {
+    const c = this.ctx;
+    const cx = W / 2, cy = H / 2, g = 4 * s, l = 7 * s;
+    c.strokeStyle = 'rgba(0,0,0,0.7)';
+    c.lineWidth = 4 * s;
+    this._cross(cx, cy, g, l);
+    c.strokeStyle = '#4dff7c';
+    c.lineWidth = 2 * s;
+    this._cross(cx, cy, g, l);
+  }
+
+  _cross(cx, cy, g, l) {
+    const c = this.ctx;
+    c.beginPath();
+    c.moveTo(cx - g - l, cy); c.lineTo(cx - g, cy);
+    c.moveTo(cx + g, cy); c.lineTo(cx + g + l, cy);
+    c.moveTo(cx, cy - g - l); c.lineTo(cx, cy - g);
+    c.moveTo(cx, cy + g); c.lineTo(cx, cy + g + l);
+    c.stroke();
+  }
+
+  _scope(W, H, s) {
+    const c = this.ctx;
+    const r = H * 0.47;
+    c.save();
+    c.fillStyle = '#000';
+    c.beginPath();
+    c.rect(0, 0, W, H);
+    c.arc(W / 2, H / 2, r, 0, Math.PI * 2, true);
+    c.fill('evenodd');
+    c.strokeStyle = '#000';
+    c.lineWidth = 1.5 * s;
+    c.beginPath();
+    c.moveTo(W / 2 - r, H / 2); c.lineTo(W / 2 + r, H / 2);
+    c.moveTo(W / 2, H / 2 - r); c.lineTo(W / 2, H / 2 + r);
+    c.stroke();
+    c.restore();
+  }
+
+  _clipCard(info, W, H, s) {
+    const { clip, tick, demo } = info;
+    const rate = demo.tickRate;
+    const age = (tick - clip.start) / rate;
+    const c = this.ctx;
+    // watermark
+    c.globalAlpha = 0.75;
+    this._text(`${demo.meta.map} · раунд ${clip.round} · ${clip.playerName}`, 14 * s, 18 * s, 12 * s, '#d5d9e0', 'left', 500);
+    c.globalAlpha = 1;
+    if (age < 0 || age > 3.5) return;
+    const alpha = Math.min(1, age / 0.3, (3.5 - age) / 0.5);
+    c.globalAlpha = Math.max(0, alpha);
+    const y = H * 0.74;
+    c.font = `800 ${30 * s}px ${FONT}`;
+    const title = clip.label ? `${clip.label} — ${clip.playerName}` : clip.title;
+    const tw = c.measureText(title).width;
+    const tags = (clip.tags || []).slice(0, 5).join('  ·  ');
+    c.font = `500 ${14 * s}px ${FONT}`;
+    const gw = c.measureText(tags).width;
+    const w = Math.max(tw, gw) + 48 * s;
+    const x = 30 * s;
+    this._panel(x, y, w, 70 * s, 8 * s, 'rgba(10,12,15,0.8)');
+    c.fillStyle = COLORS[clip.side || 'T'];
+    c.fillRect(x, y, 6 * s, 70 * s);
+    this._text(title, x + 22 * s, y + 25 * s, 30 * s, '#ffffff', 'left', 800);
+    this._text(tags, x + 22 * s, y + 52 * s, 14 * s, '#ffd34d', 'left', 500);
+    c.globalAlpha = 1;
+  }
+}

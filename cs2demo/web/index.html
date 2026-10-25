@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CS2 3D Demo Viewer</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23f0a020'/%3E%3Cpath d='M9 22 16 8l7 14h-4l-3-6-3 6z' fill='%23111'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand"><span class="logo">3D</span> CS2 Demo Viewer</div>
+    <div id="demo-title" class="demo-title"></div>
+    <div class="spacer"></div>
+    <button id="btn-library" class="btn">Демки</button>
+    <label class="btn primary" title="Загрузить демо CS2">
+      Загрузить .dem
+      <input type="file" id="file-input" accept=".dem" hidden>
+    </label>
+  </header>
+
+  <main id="main">
+    <section id="stage">
+      <canvas id="gl"></canvas>
+      <canvas id="hud"></canvas>
+      <div id="cam-bar" class="cam-bar">
+        <div id="cam-target" class="cam-target"></div>
+      </div>
+      <div id="stage-msg" class="stage-msg hidden"></div>
+      <div id="rec-indicator" class="rec-indicator hidden"><span class="dot"></span><span id="rec-text">REC</span>
+        <button id="rec-cancel" class="btn small">Отмена</button></div>
+      <div id="loading" class="loading hidden">
+        <div class="spinner"></div>
+        <div id="loading-text">Загрузка…</div>
+        <div class="bar"><div id="loading-bar"></div></div>
+      </div>
+    </section>
+
+    <aside id="sidebar">
+      <nav class="tabs">
+        <button data-tab="players" class="active">Игроки</button>
+        <button data-tab="highlights">Хайлайты <span id="hl-count" class="badge"></span></button>
+        <button data-tab="clips">Клипы <span id="clip-count" class="badge"></span></button>
+        <button data-tab="view">Вид</button>
+      </nav>
+      <div class="tab-body" id="tab-players"></div>
+      <div class="tab-body hidden" id="tab-highlights"></div>
+      <div class="tab-body hidden" id="tab-clips"></div>
+      <div class="tab-body hidden" id="tab-view"></div>
+    </aside>
+  </main>
+
+  <footer id="controls">
+    <div class="ctrl-row">
+      <button id="btn-prev-round" class="btn icon" title="Предыдущий раунд (Shift+←)">⏮</button>
+      <button id="btn-back" class="btn icon" title="Назад 5 с (←)">↺</button>
+      <button id="btn-play" class="btn icon play" title="Пуск/пауза (Пробел)">▶</button>
+      <button id="btn-fwd" class="btn icon" title="Вперёд 5 с (→)">↻</button>
+      <button id="btn-next-round" class="btn icon" title="Следующий раунд (Shift+→)">⏭</button>
+      <span id="time-label" class="time">0:00 / 0:00</span>
+      <select id="round-select" title="Раунд"></select>
+      <div class="spacer"></div>
+      <div class="seg" id="cam-modes">
+        <button data-cam="free" title="Свободная камера (1)">Свободная</button>
+        <button data-cam="follow" title="Следить за игроком (2)">Следить</button>
+        <button data-cam="pov" title="От первого лица (3)">От 1-го лица</button>
+        <button data-cam="chase" title="Камера из-за спины (4)">Из-за спины</button>
+        <button data-cam="top" title="Вид сверху, как радар (5)">Сверху</button>
+        <button data-cam="overview" title="Следить сверху под углом (6)">Обзор</button>
+      </div>
+      <div class="spacer"></div>
+      <label class="speed">Скорость
+        <select id="speed-select">
+          <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option><option value="2">2×</option>
+          <option value="4">4×</option><option value="8">8×</option><option value="16">16×</option>
+        </select>
+      </label>
+    </div>
+    <canvas id="timeline" title="Таймлайн: клик — перемотка"></canvas>
+  </footer>
+
+  <div id="library" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Библиотека демо</h2>
+        <button id="library-close" class="btn icon" title="Закрыть">✕</button>
+      </div>
+      <div id="dropzone" class="dropzone">
+        <div class="dz-title">Перетащите сюда .dem файл CS2</div>
+        <div class="dz-sub">или <label class="link">выберите файл<input type="file" id="file-input-2" accept=".dem" hidden></label>.
+          Демо разбирается на вашем компьютере, ничего никуда не отправляется.</div>
+        <div id="upload-progress" class="bar hidden"><div></div></div>
+        <div id="upload-text" class="dz-sub"></div>
+      </div>
+      <div id="demo-list" class="demo-list"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

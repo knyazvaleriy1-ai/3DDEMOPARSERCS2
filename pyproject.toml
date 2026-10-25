@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cs2demo"
+version = "0.1.0"
+description = "3D-просмотр демо CS2, парсер и автозапись клипов хайлайтов"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "demoparser2>=0.40",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "python-multipart>=0.0.9",
+    "imageio-ffmpeg>=0.5",
+]
+
+[project.optional-dependencies]
+render = ["playwright>=1.40"]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+cs2demo = "cs2demo.cli:main"
+
+[tool.setuptools]
+packages = ["cs2demo"]
+
+[tool.setuptools.package-data]
+cs2demo = ["web/*.html", "web/css/*", "web/js/*", "web/vendor/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
