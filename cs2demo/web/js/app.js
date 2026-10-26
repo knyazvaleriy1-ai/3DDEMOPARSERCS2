@@ -242,6 +242,13 @@ class App {
       $('volume').value = String(audio.volume);
     };
     $('btn-sound').onclick = () => { audio.ensure(); audio.setMuted(!audio.muted); syncSound(); };
+    $('btn-keys').onclick = () => v.setKeys(!v.settings.keys);
+    v.on((type) => {
+      if (type !== 'settings') return;
+      $('btn-keys').classList.toggle('active', v.settings.keys);
+      this.viewPanel.render();
+    });
+    $('btn-keys').classList.toggle('active', v.settings.keys);
     $('volume').oninput = (e) => { audio.ensure(); audio.setVolume(Number(e.target.value)); if (audio.muted) audio.setMuted(false); syncSound(); };
     syncSound();
     $('round-select').onchange = (e) => {
@@ -261,6 +268,7 @@ class App {
         case 'Tab': e.preventDefault(); this._cycleFocus(e.shiftKey ? -1 : 1); break;
         case 'Escape': this.hideLibrary(); break;
         case 'KeyM': $('btn-sound').click(); break;
+        case 'KeyK': v.setKeys(!v.settings.keys); break;
         default: {
           const modes = { Digit1: 'free', Digit2: 'follow', Digit3: 'pov', Digit4: 'chase', Digit5: 'top', Digit6: 'overview' };
           if (modes[e.code]) v.setMode(modes[e.code]);

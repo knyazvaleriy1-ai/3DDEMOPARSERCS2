@@ -57,6 +57,8 @@ export class Hud {
     if (this.options.scorebar) this._scorebar(info, W, s);
     if (this.options.killfeed) this._killfeed(info, W, s);
     if (info.pov && info.povState && info.povState.present) this._povHud(info, W, H, s);
+    this._kbTop = null;
+    if (info.keys) this._keyboard(info, W, H, s);
     if (info.clip) this._clipCard(info, W, H, s);
   }
 
@@ -256,6 +258,91 @@ export class Hud {
     }
   }
 
+  /** On-screen keyboard: the keys and mouse buttons the followed player holds. */
+  _keyboard(info, W, H, s) {
+    const k = info.keys;
+    const c = this.ctx;
+    const u = 30 * s, g = 4 * s; // key size, gap
+    const kw = 4 * u + 3 * g, mw = 1.7 * u, bh = 3 * u + 2 * g;
+    const x0 = 12 * s;
+    const y0 = (info.pov ? H - 64 * s : H - 12 * s) - bh;
+    this._kbTop = y0 - (info.pov ? 0 : 18 * s);
+    if (k.player < 0 || !k.keys) {
+      const msg = k.player < 0 ? 'Клавиатура: выберите игрока (клик по нику)' : 'Нет данных о клавишах — откройте демо заново';
+      c.font = `500 ${12 * s}px ${FONT}`;
+      this._panel(x0, y0 + bh - 26 * s, c.measureText(msg).width + 16 * s, 26 * s, 6 * s, 'rgba(10,12,15,0.72)');
+      this._text(msg, x0 + 8 * s, y0 + bh - 13 * s, 12 * s, '#c9cfda', 'left', 500);
+      return;
+    }
+    const held = k.alive ? k.keys : {};
+    const key = (label, x, y, w, on, known = true) => {
+      this._panel(x, y, w, u, 5 * s, on ? 'rgba(240,160,32,0.95)' : 'rgba(10,12,15,0.62)', on ? null : 'rgba(255,255,255,0.16)');
+      const size = (label.length > 2 ? 10 : 14) * s;
+      this._text(label, x + w / 2, y + u / 2 + 0.5 * s, size, on ? '#141414' : known ? '#c9cfda' : '#5b626e', 'center', 700);
+    };
+    const col = (i) => x0 + i * (u + g);
+    const row = (j) => y0 + j * (u + g);
+    // Keys without data (older demoparser2) are drawn dimmed.
+    const kn = (name) => k.known.has(name);
+    for (const [name, i, j] of [['TAB', 0, 0], ['W', 1, 0], ['E', 2, 0], ['R', 3, 0],
+      ['A', 0, 1], ['S', 1, 1], ['D', 2, 1], ['F', 3, 1]]) {
+      key(name, col(i), row(j), u, held[name], kn(name));
+    }
+    const wShift = 1.5 * u + 0.5 * g, wCtrl = u, wSpace = kw - wShift - wCtrl - 2 * g;
+    key('SHIFT', col(0), row(2), wShift, held.SHIFT, kn('SHIFT'));
+    key('CTRL', col(0) + wShift + g, row(2), wCtrl, held.CTRL, kn('CTRL'));
+    key('SPACE', col(0) + wShift + wCtrl + 2 * g, row(2), wSpace, held.SPACE, kn('SPACE'));
+
+    // Mouse: buttons, wheel (jumps bound to it) and movement.
+    const mx = x0 + kw + 2 * g, my = y0;
+    this._panel(mx, my, mw, bh, mw / 2.2, 'rgba(10,12,15,0.62)', 'rgba(255,255,255,0.16)');
+    const bh2 = 1.25 * u;
+    c.save();
+    c.beginPath();
+    c.roundRect(mx, my, mw, bh, mw / 2.2);
+    c.clip();
+    const lmb = held.LMB || (k.alive && k.shot);
+    c.fillStyle = lmb ? 'rgba(240,160,32,0.95)' : 'rgba(255,255,255,0.05)';
+    c.fillRect(mx, my, mw / 2 - 0.5 * s, bh2);
+    c.fillStyle = held.RMB ? 'rgba(240,160,32,0.95)' : 'rgba(255,255,255,0.05)';
+    c.fillRect(mx + mw / 2 + 0.5 * s, my, mw / 2 - 0.5 * s, bh2);
+    c.restore();
+    c.strokeStyle = 'rgba(255,255,255,0.16)';
+    c.lineWidth = Math.max(1, 1.5 * s);
+    c.beginPath();
+    c.moveTo(mx + mw / 2, my); c.lineTo(mx + mw / 2, my + bh2);
+    c.moveTo(mx, my + bh2); c.lineTo(mx + mw, my + bh2);
+    c.stroke();
+    // wheel
+    const ww = 0.34 * mw, wh = 0.72 * u;
+    const wheel = held.WHEEL;
+    this._panel(mx + mw / 2 - ww / 2, my + 0.25 * u, ww, wh, ww / 2, wheel ? '#ffd34d' : kn('WHEEL') ? '#2a2f38' : '#1c2027',
+      'rgba(255,255,255,0.25)');
+    if (wheel) this._text('▼', mx + mw / 2, my + 0.25 * u + wh / 2, 9 * s, '#141414', 'center', 800);
+    // movement: a dot pushed in the direction the mouse moves
+    const cx = mx + mw / 2, cy = my + bh2 + (bh - bh2) / 2, r = Math.min(mw, bh - bh2) * 0.34;
+    c.strokeStyle = 'rgba(255,255,255,0.18)';
+    c.lineWidth = Math.max(1, s);
+    c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.stroke();
+    const [dx, dy] = k.mouse;
+    const mag = Math.hypot(dx, dy);
+    if (mag > 4) {
+      const len = r * Math.min(1, Math.log1p(mag / 25) / Math.log1p(40)); // 1000 deg/s fills the circle
+      const ex2 = cx + (dx / mag) * len, ey2 = cy + (dy / mag) * len;
+      c.strokeStyle = '#ffd34d';
+      c.lineWidth = 2.5 * s;
+      c.beginPath(); c.moveTo(cx, cy); c.lineTo(ex2, ey2); c.stroke();
+      c.fillStyle = '#ffd34d';
+      c.beginPath(); c.arc(ex2, ey2, 3 * s, 0, Math.PI * 2); c.fill();
+    } else {
+      c.fillStyle = 'rgba(255,255,255,0.35)';
+      c.beginPath(); c.arc(cx, cy, 2 * s, 0, Math.PI * 2); c.fill();
+    }
+    if (!info.pov) {
+      this._text(k.name, x0, y0 - 9 * s, 12 * s, '#e7e9ee', 'left', 600);
+    }
+  }
+
   _crosshair(W, H, s) {
     const c = this.ctx;
     const cx = W / 2, cy = H / 2, g = 4 * s, l = 7 * s;
@@ -307,7 +394,8 @@ export class Hud {
     if (age < 0 || age > 3.5) return;
     const alpha = Math.min(1, age / 0.3, (3.5 - age) / 0.5);
     c.globalAlpha = Math.max(0, alpha);
-    const y = H * 0.74;
+    // above the on-screen keyboard when it is shown
+    const y = Math.min(H * 0.74, this._kbTop === null ? Infinity : this._kbTop - 80 * s);
     c.font = `800 ${30 * s}px ${FONT}`;
     const title = (clip.badge ? `${clip.badge}  ` : '') + (clip.label ? `${clip.label} — ${clip.playerName}` : clip.title);
     const tw = c.measureText(title).width;

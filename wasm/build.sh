@@ -17,6 +17,9 @@ if [ ! -d vendor/demoparser ]; then
   # std::time::Instant panics on wasm32-unknown-unknown; the parser only uses
   # it for optional profiling output, so swap in a wasm-safe clock.
   grep -rl 'std::time::Instant' vendor/demoparser/src/parser/src | xargs sed -i 's/std::time::Instant/crate::wasm_clock::Instant/g'
+  # The WALK button prop is mapped to "IN_WALK", which is not in BUTTONMAP,
+  # so it never comes out; the on-screen keyboard needs it for Shift.
+  sed -i 's/"WALK" => "IN_WALK",/"WALK" => "WALK",/' vendor/demoparser/src/parser/src/maps.rs
   # csgoproto's build script regenerates protobuf.rs from the latest
   # GameTracking-CS2 checkout (needs protoc, not reproducible); the release
   # already ships the generated file.

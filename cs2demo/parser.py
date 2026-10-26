@@ -11,6 +11,7 @@ Output (see ``write_parsed``):
   ``ang``   int16[F][P][2]    yaw, pitch in centi-degrees
   ``u8``    uint8[F][P][6]    health, armor, flags, weapon, duck, place
   ``money`` uint16[F][P]      account balance
+  ``keys``  uint16[F][P]      keys held (``KEY_NAMES``) for the on-screen keyboard
 
 Flags: see the ``FLAG_*`` constants below.
 """
@@ -37,6 +38,28 @@ FLAG_SCOPED = 8
 FLAG_DEFUSING = 16
 FLAG_HELMET = 32
 FLAG_DEFUSER = 64
+FLAG_AIRBORNE = 128
+
+# On-screen keyboard: bit i of the "keys" section is KEY_NAMES[i], i.e. bit
+# KEY_BUTTONS[i][1] of the game's button mask (m_nButtonDownMaskPrev).
+KEY_BUTTONS = [
+    ("W", 3), ("A", 9), ("S", 4), ("D", 10), ("SPACE", 1), ("CTRL", 2), ("SHIFT", 16),
+    ("LMB", 0), ("RMB", 11), ("R", 13), ("E", 5), ("TAB", 33), ("F", 35),
+]  # fmt: skip
+KEY_SPACE = 4
+# A jump with the jump button never held was bound to the mouse wheel: a scroll
+# presses and releases +jump within one tick, so the mask never shows it.
+KEY_WHEEL = 13
+KEY_NAMES = [name for name, _bit in KEY_BUTTONS] + ["WHEEL"]
+# demoparser2's single-button props -> bit of the mask. (Its raw "buttons"
+# column is missing in some demos; these come from the same mask.)
+BUTTON_PROPS = {
+    "FORWARD": 3, "LEFT": 9, "BACK": 4, "RIGHT": 10, "JUMP": 1, "DUCK": 2, "WALK": 16,
+    "FIRE": 0, "RIGHTCLICK": 11, "RELOAD": 13, "USE": 5, "SCOREBOARD": 33, "INSPECT": 35,
+}  # fmt: skip
+# Not every demoparser2 has all of them: 0.42.0 lacks JUMP and DUCK, and WALK
+# never comes out (mapped to "IN_WALK"; fixed in the WebAssembly build), so
+# meta["frames"]["keysKnown"] lists the keys there is data for.
 
 U8_FIELDS = ["health", "armor", "flags", "weapon", "duck", "place"]
 
@@ -59,6 +82,7 @@ TICK_PROPS = [
     "duck_amount",
     "last_place_name",
     "game_time",
+    "is_airborne",
 ]
 
 SCOREBOARD_PROPS = [
@@ -268,7 +292,7 @@ def parse_demo(
 
     progress(0.2, "Позиции игроков")
     tick_list = list(range(0, last_event_tick + 64 * 300, step))
-    df = parser.parse_ticks(TICK_PROPS, ticks=tick_list)
+    df = parser.parse_ticks(TICK_PROPS + list(BUTTON_PROPS), ticks=tick_list)
     if df is None or len(df) == 0:
         raise DemoParseError("В демо нет данных об игроках")
     tick_rate = _detect_tick_rate(df)
@@ -330,6 +354,7 @@ def parse_demo(
     ang = np.zeros((frame_count, player_count, 2), dtype="<i2")
     u8 = np.zeros((frame_count, player_count, len(U8_FIELDS)), dtype=np.uint8)
     money = np.zeros((frame_count, player_count), dtype="<u2")
+    keys = np.zeros((frame_count, player_count), dtype="<u2")
 
     pos[fi, pi, 0] = df["X"].to_numpy(dtype=np.float32, na_value=0)
     pos[fi, pi, 1] = df["Y"].to_numpy(dtype=np.float32, na_value=0)
@@ -341,6 +366,8 @@ def parse_demo(
     ang[fi, pi, 1] = np.round(pitch * 100).astype(np.int16)
 
     def col_bool(name: str) -> np.ndarray:
+        if name not in df:
+            return np.zeros(len(df), dtype=bool)
         return df[name].fillna(False).astype(bool).to_numpy()
 
     flags = np.full(len(df), FLAG_PRESENT, dtype=np.uint8)
@@ -350,6 +377,7 @@ def parse_demo(
     flags |= np.where(col_bool("is_defusing"), FLAG_DEFUSING, 0).astype(np.uint8)
     flags |= np.where(col_bool("has_helmet"), FLAG_HELMET, 0).astype(np.uint8)
     flags |= np.where(col_bool("has_defuser"), FLAG_DEFUSER, 0).astype(np.uint8)
+    flags |= np.where(col_bool("is_airborne"), FLAG_AIRBORNE, 0).astype(np.uint8)
 
     u8[fi, pi, 0] = np.clip(df["health"].fillna(0).to_numpy(), 0, 255).astype(np.uint8)
     u8[fi, pi, 1] = np.clip(df["armor_value"].fillna(0).to_numpy(), 0, 255).astype(np.uint8)
@@ -362,6 +390,11 @@ def parse_demo(
         df["last_place_name"].map(place_idx).fillna(0).to_numpy(dtype=np.int64).clip(0, 255).astype(np.uint8)
     )
     money[fi, pi] = np.clip(df["balance"].fillna(0).to_numpy(), 0, 65535).astype(np.uint16)
+    masks, keys_known = _button_masks(df, col_bool)
+    keys[fi, pi] = keys_from_buttons(masks)
+    if "SPACE" in keys_known and "is_airborne" in df:
+        mark_wheel_jumps(keys, u8[:, :, 2], pos[:, :, 2], step)
+        keys_known.append("WHEEL")
 
     def frame_of(tick: int) -> int:
         return int(min(max((tick - t0) // step, 0), frame_count - 1))
@@ -523,6 +556,7 @@ def parse_demo(
         ("ang", ang, "int16"),
         ("u8", u8, "uint8"),
         ("money", money, "uint16"),
+        ("keys", keys, "uint16"),
     ):
         raw = arr.tobytes(order="C")
         sections.append({"name": name, "dtype": dtype, "offset": offset, "bytes": len(raw)})
@@ -539,6 +573,8 @@ def parse_demo(
         "count": frame_count,
         "players": player_count,
         "u8Fields": U8_FIELDS,
+        "keys": KEY_NAMES,
+        "keysKnown": keys_known,
         "sections": sections,
     }
 
@@ -549,6 +585,48 @@ def parse_demo(
     meta["parseSeconds"] = round(time.time() - started, 2)
     progress(1.0, "Готово")
     return meta, b"".join(blobs)
+
+
+def _button_masks(df: Any, col_bool: Callable[[str], np.ndarray]) -> tuple[np.ndarray, list[str]]:
+    """Game button mask per row from the single-button columns, and the
+    on-screen keyboard keys those columns cover."""
+    masks = np.zeros(len(df), dtype=np.uint64)
+    for name, bit in BUTTON_PROPS.items():
+        masks |= np.where(col_bool(name), np.uint64(1 << bit), np.uint64(0))
+    bits = {bit for name, bit in BUTTON_PROPS.items() if name in df}
+    return masks, [key for key, bit in KEY_BUTTONS if bit in bits]
+
+
+def keys_from_buttons(masks: np.ndarray) -> np.ndarray:
+    """Game button masks (uint64) -> bits of the "keys" section (uint16)."""
+    masks = np.asarray(masks, dtype=np.uint64)
+    out = np.zeros(masks.shape, dtype=np.uint16)
+    for i, (_name, bit) in enumerate(KEY_BUTTONS):
+        out |= ((masks >> np.uint64(bit)) & np.uint64(1)).astype(np.uint16) << np.uint16(i)
+    return out
+
+
+def mark_wheel_jumps(keys: np.ndarray, flags: np.ndarray, z: np.ndarray, step: int) -> None:
+    """Set KEY_WHEEL around jumps made without the jump button ([F][P] arrays).
+
+    A jump: on the ground, then airborne and at least 8 units higher 6 ticks
+    later. If Space wasn't held from 12 ticks before to 4 ticks after the
+    take-off, the jump came from the mouse wheel; mark it for 8 ticks."""
+    frames = keys.shape[0]
+    rise, back, ahead, mark = max(1, 6 // step), max(1, 12 // step), max(1, 4 // step), max(1, 8 // step)
+    if frames <= rise + 1:
+        return
+    air = (flags & FLAG_AIRBORNE) != 0
+    alive = (flags & FLAG_ALIVE) != 0
+    space = (keys & (1 << KEY_SPACE)) != 0
+    zz = z.astype(np.float64)
+    f = np.arange(1, frames - rise)
+    takeoff = ~air[f - 1] & air[f] & alive[f - 1] & alive[f] & (zz[f + rise] - zz[f - 1] > 8.0)
+    for i, p in zip(*np.nonzero(takeoff), strict=True):
+        t = int(f[i])
+        if space[max(0, t - back) : t + ahead + 1, p].any():
+            continue
+        keys[max(0, t - 1) : t - 1 + mark, p] |= 1 << KEY_WHEEL
 
 
 def _build_rounds(events: dict[str, Any], t0: int, t1: int) -> list[dict[str, Any]]:

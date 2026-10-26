@@ -52,7 +52,7 @@ export class Viewer {
     this.focus = -1;
     this.settings = {
       roofCut: 'auto', cutHeight: 400, labels: true, xray: true, grenades: true, tracers: true,
-      shadows: true, grid: false, radar: false, viewmodel: true, detail: true,
+      shadows: true, grid: false, radar: false, viewmodel: true, detail: true, keys: loadKeysSetting(),
     };
     this.settings.detail = !this.softwareGL;
     this.clip = null; // highlight shown with a title card (recording)
@@ -165,6 +165,13 @@ export class Viewer {
     this.camera.fov = FREE_FOV;
     this.camera.updateProjectionMatrix();
     this.controls.update();
+  }
+
+  /** Show or hide the on-screen keyboard (remembered between visits). */
+  setKeys(on) {
+    this.settings.keys = !!on;
+    saveKeysSetting(this.settings.keys);
+    this._emit('settings');
   }
 
   applySettings() {
@@ -342,6 +349,7 @@ export class Viewer {
     for (const st of this.states) if (st.present && st.alive) alive[st.side]++;
     const pov = this.mode === 'pov' && this.focus >= 0;
     this.hud.draw({
+      keys: this.settings.keys ? this._keysInfo(tick) : null,
       demo: d, tick, round, roundStart, bomb, alive,
       score: d.scoreAt(tick, this.states),
       focus: this.focus,
@@ -351,6 +359,28 @@ export class Viewer {
       blind: pov ? d.blindAt(this.focus, tick) : 0,
       clip: this.clip,
     });
+  }
+
+  /** What the on-screen keyboard shows for the followed player. */
+  _keysInfo(tick) {
+    const d = this.demo, p = this.focus;
+    if (p < 0) return { player: -1 };
+    const rate = d.tickRate;
+    const st = this.states[p];
+    const prev = d.state(p, tick - 4, this._keysPrev || (this._keysPrev = new PlayerState()));
+    const shot = d.lastShotTick(p, tick);
+    let dyaw = st.yaw - prev.yaw;
+    dyaw -= 360 * Math.round(dyaw / 360);
+    return {
+      player: p,
+      name: d.players[p]?.name || '',
+      alive: st.alive,
+      keys: d.keysAt(p, tick, this._keysOut || (this._keysOut = {})),
+      known: d.keysKnown,
+      shot: shot !== null && tick - shot < 0.12 * rate,
+      // mouse movement in degrees per second (right, down)
+      mouse: prev.alive && st.alive ? [-dyaw / (4 / rate), (st.pitch - prev.pitch) / (4 / rate)] : [0, 0],
+    };
   }
 
   /** First-person weapon, drawn over the scene after clearing depth. */
@@ -509,4 +539,15 @@ export class Viewer {
     ctx.drawImage(this.canvas, 0, 0, target.width, target.height);
     if (withHud) ctx.drawImage(this.hudCanvas, 0, 0, target.width, target.height);
   }
+}
+
+const KEYS_SETTING = 'cs2demo.keys';
+
+function loadKeysSetting() {
+  try { return localStorage.getItem(KEYS_SETTING) === '1'; } catch (_) { return false; }
+}
+
+/** Remember whether the on-screen keyboard is on. */
+export function saveKeysSetting(on) {
+  try { localStorage.setItem(KEYS_SETTING, on ? '1' : '0'); } catch (_) { /* private mode */ }
 }

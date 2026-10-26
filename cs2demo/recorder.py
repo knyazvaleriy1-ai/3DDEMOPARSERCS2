@@ -81,6 +81,7 @@ def render_highlights(
     slowmo: bool = False,
     hud: bool = True,
     sound: bool = True,
+    keys: bool = False,
     quality: float = 0.9,
     detail: str = "auto",
     badge: str | None = None,
@@ -136,7 +137,7 @@ def render_highlights(
             total = len(highlights)
             for n, h in enumerate(highlights):
                 opts = {"pov": pov, "fps": fps, "slowmo": slowmo, "hud": hud, "sound": sound, "quality": quality,
-                        "badge": badge, "match": match}
+                        "keys": keys, "badge": badge, "match": match}
                 info = page.evaluate("([id, opts]) => window.cs2render.begin(id, opts)", [h["id"], opts])
                 frames = int(info["frames"])
                 dest = out_dir / f"{h['id']}-{pov}{suffix}.mp4"
@@ -181,6 +182,7 @@ def render_highlights(
                     "sound": bool(wav),
                     "slowmo": slowmo,
                     "hud": hud,
+                    "keys": keys,
                     "detail": detail,
                     "badge": badge,
                     "match": match,

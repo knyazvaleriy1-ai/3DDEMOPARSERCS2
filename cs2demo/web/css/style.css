@@ -38,6 +38,7 @@ body { display: grid; grid-template-rows: 48px 1fr auto; grid-template-columns: 
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn.danger { color: #ff8a8d; }
+.btn.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .btn.small { padding: 3px 8px; font-size: 12px; }
 .btn.icon { padding: 5px 9px; min-width: 32px; justify-content: center; }
 .btn.play { min-width: 44px; font-size: 15px; }

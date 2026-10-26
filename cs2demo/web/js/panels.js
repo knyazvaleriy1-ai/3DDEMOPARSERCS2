@@ -138,6 +138,7 @@ export class HighlightsPanel {
         <label class="check"><input type="checkbox" data-opt="slowmo" ${o.slowmo ? 'checked' : ''}> Замедление в момент киллов</label>
         <label class="check"><input type="checkbox" data-opt="hud" ${o.hud ? 'checked' : ''}> HUD, килфид и титры</label>
         <label class="check"><input type="checkbox" data-opt="sound" ${o.sound ? 'checked' : ''}> Звук (выстрелы, гранаты, шаги)</label>
+        <label class="check"><input type="checkbox" data-opt="keys" ${o.keys ? 'checked' : ''}> Экранная клавиатура в клипе</label>
         <label class="check" title="После загрузки нового демо сразу записать 5 лучших хайлайтов">
           <input type="checkbox" data-opt="auto" ${o.auto ? 'checked' : ''}> Автозапись 5 лучших после загрузки демо</label>
         <div class="btn-row">
@@ -291,6 +292,7 @@ export class HighlightsPanel {
         const h = list[i];
         const director = new ClipDirector(this.viewer, h, {
           pov: this.opts.pov, fps, width, height, slowmo: this.opts.slowmo, hud: this.opts.hud, sound: this.opts.sound,
+          keys: this.opts.keys,
         });
         const label = `Клип ${i + 1}/${list.length}: ${h.title}`;
         const onProgress = (f) => {
@@ -335,7 +337,7 @@ export class HighlightsPanel {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clips: ids, pov: this.opts.pov, width, height, fps: this.opts.fps,
-          slowmo: this.opts.slowmo, hud: this.opts.hud, sound: this.opts.sound }),
+          slowmo: this.opts.slowmo, hud: this.opts.hud, sound: this.opts.sound, keys: this.opts.keys }),
       });
       this._status(`Рендер на сервере запущен (${res.clips.length} клип.)`);
       this._pollJob(res.job);
@@ -362,7 +364,7 @@ export class HighlightsPanel {
 }
 
 function loadOpts() {
-  const defaults = { pov: 'first', res: '720p', fps: 30, slowmo: false, hud: true, sound: true, auto: false };
+  const defaults = { pov: 'first', res: '720p', fps: 30, slowmo: false, hud: true, sound: true, keys: false, auto: false };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem('cs2demo.rec') || '{}') };
   } catch (_) {
@@ -506,6 +508,17 @@ Object.assign(ClipsPanel.prototype, {
 
 // -- View settings ---------------------------------------------------------------------
 
+function keysNote(demo) {
+  if (!demo) return '';
+  if (!demo.keys) return '<p class="muted small">В этом демо нет данных о клавишах: оно разобрано старой версией — откройте файл заново.</p>';
+  const missing = demo.keyNames.filter((k) => !demo.keysKnown.has(k));
+  if (missing.length) {
+    return `<p class="muted small">Нет данных для ${esc(missing.join(', ').replace('WHEEL', 'колеса'))}: демо разобрано
+      старым demoparser2 (в веб-версии есть всё).</p>`;
+  }
+  return '<p class="muted small">Колесо мыши: прыжок без зажатого пробела (бинд на колесо).</p>';
+}
+
 export class ViewPanel {
   constructor(el, viewer) {
     this.el = el;
@@ -530,6 +543,9 @@ export class ViewPanel {
         <label class="check"><input type="checkbox" data-s="detail" ${s.detail ? 'checked' : ''}> Детальные материалы карты</label>
         <label class="check"><input type="checkbox" data-s="radar" ${s.radar ? 'checked' : ''}> Радар на полу</label>
         <label class="check"><input type="checkbox" data-s="grid" ${s.grid ? 'checked' : ''}> Сетка 64 юнита</label>
+        <label class="check" title="Какие клавиши и кнопки мыши жмёт выбранный игрок. Клавиша K">
+          <input type="checkbox" data-s="keys" ${s.keys ? 'checked' : ''}> Экранная клавиатура (K)</label>
+        ${keysNote(this.viewer.demo)}
       </div>
       <div class="panel">
         <h3>Крыши и потолки</h3>
@@ -545,11 +561,12 @@ export class ViewPanel {
         <div class="btn-row"><button class="btn small" data-act="reset">Сбросить камеру</button></div>
         <p class="muted small">Мышь: ЛКМ — вращать, ПКМ — сдвиг, колесо — зум.<br>
         Клавиши: Пробел — пауза, ←/→ — 5 с, Shift+←/→ — раунд, 1–6 — камера
-        (свободная, следить, от 1-го лица, из-за спины, сверху, обзор), [ и ] — скорость, Tab — следующий игрок.</p>
+        (свободная, следить, от 1-го лица, из-за спины, сверху, обзор), [ и ] — скорость, Tab — следующий игрок, K — экранная клавиатура.</p>
         <p class="muted small">Карта: ${esc(mapKind)}</p>
       </div>`;
     this.el.querySelectorAll('[data-s]').forEach((input) => input.addEventListener('input', () => {
       const k = input.dataset.s;
+      if (k === 'keys') { this.viewer.setKeys(input.checked); return; }
       s[k] = input.type === 'checkbox' ? input.checked : k === 'cutHeight' ? Number(input.value) : input.value;
       if (k === 'roofCut') this.el.querySelector('[data-s=cutHeight]').disabled = s.roofCut !== 'manual';
       this.viewer.applySettings();

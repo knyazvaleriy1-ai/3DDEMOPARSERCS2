@@ -51,8 +51,9 @@ export class ClipDirector {
     const v = this.viewer;
     this.saved = {
       mode: v.mode, focus: v.focus, tick: v.tick, playing: v.playing, clip: v.clip,
-      fixed: v.fixedSize, target: v.controls.target.clone(), cam: v.camera.position.clone(),
+      fixed: v.fixedSize, target: v.controls.target.clone(), cam: v.camera.position.clone(), keys: v.settings.keys,
     };
+    if (this.opts.keys !== undefined) v.settings.keys = !!this.opts.keys;
     v.pause();
     v.externalDriver = true;
     v.setFixedSize({ width: this.opts.width, height: this.opts.height });
@@ -76,6 +77,7 @@ export class ClipDirector {
     const v = this.viewer;
     const s = this.saved;
     v.externalDriver = false;
+    v.settings.keys = s.keys;
     v.clip = s.clip;
     v.setFixedSize(s.fixed);
     v.tick = s.tick;
