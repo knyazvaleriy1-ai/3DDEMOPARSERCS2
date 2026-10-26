@@ -1,10 +1,12 @@
-# Publishes the server-less web version to GitHub Pages on every push to master.
+# Publishes the server-less web version to GitHub Pages on every push to master
+# (pull requests only build it).
 # One-time setup: Settings → Pages → Build and deployment → Source: "GitHub Actions".
 name: Web version (GitHub Pages)
 
 on:
   push:
     branches: [master]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -13,15 +15,15 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # Map geometry/radars (awpy-data release) and the player model are
@@ -30,16 +32,17 @@ jobs:
         run: python scripts/build_site.py _site
         env:
           CS2DEMO_DATA: ${{ runner.temp }}/cs2demo-data
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
   deploy:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

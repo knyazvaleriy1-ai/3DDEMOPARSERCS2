@@ -58,7 +58,10 @@
   для этого нужна обычная (Python) версия.
 
 Сайт собирается из этого репозитория автоматически при каждом пуше в `master`
-(GitHub Actions → GitHub Pages, см. `.github/workflows/pages.yml`). Собрать его
+(GitHub Actions → GitHub Pages, см. `.github/workflows/pages.yml`). Один раз
+нужно включить Pages: **Settings → Pages → Build and deployment → Source:
+GitHub Actions**, затем перезапустить последний запуск «Web version (GitHub
+Pages)» во вкладке **Actions** (или просто сделать следующий пуш). Собрать его
 вручную: `python scripts/build_site.py site/` и раздать папку `site/` любым
 статическим сервером. WebAssembly-парсер лежит в `cs2demo/web/vendor/demoparser/`;
 пересобрать его — `wasm/build.sh` (нужны Rust с таргетом `wasm32-unknown-unknown`
