@@ -556,6 +556,7 @@ export class ViewPanel {
         <label class="check"><input type="checkbox" data-s="xray" ${s.xray ? 'checked' : ''}> Видеть игроков сквозь стены</label>
         <label class="check"><input type="checkbox" data-s="grenades" ${s.grenades ? 'checked' : ''}> Траектории гранат</label>
         <label class="check"><input type="checkbox" data-s="tracers" ${s.tracers ? 'checked' : ''}> Трассеры выстрелов</label>
+        <label class="check"><input type="checkbox" data-s="holes" ${s.holes ? 'checked' : ''}> Следы от пуль на стенах</label>
         <label class="check"><input type="checkbox" data-s="shadows" ${s.shadows ? 'checked' : ''}> Тени от солнца</label>
         <label class="check"><input type="checkbox" data-s="viewmodel" ${s.viewmodel ? 'checked' : ''}> Оружие в руках (от 1-го лица)</label>
         <label class="check"><input type="checkbox" data-s="detail" ${s.detail ? 'checked' : ''}> Детальные материалы карты</label>

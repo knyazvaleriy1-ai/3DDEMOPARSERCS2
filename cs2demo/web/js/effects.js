@@ -1,8 +1,8 @@
-// Grenades in flight, smokes, fires, explosions, bullet tracers and the bomb.
+// Grenades in flight, smokes, fires, explosions, bullet tracers, bullet holes
+// and the bomb.
 import * as THREE from '../vendor/three.module.min.js';
-import { PlayersView } from './players.js';
-import { PlayerState } from './demo.js';
-import { firesBullets } from './util.js';
+import { ShotImpacts } from './bullets.js';
+import { HE_REACH, HE_SECONDS, HOLE_SECONDS, SMOKE_REACH, SmokeVolume } from './smoke.js';
 
 const GRENADE_COLORS = {
   smoke: 0xd8dde4,
@@ -12,10 +12,8 @@ const GRENADE_COLORS = {
   decoy: 0x9aa3ad,
 };
 
-const SMOKE_PUFFS = [
-  [0, 0, 0, 1.0], [70, 10, 20, 0.8], [-60, 5, 40, 0.8], [20, 20, -70, 0.8],
-  [-30, 40, -40, 0.75], [40, 55, 30, 0.7], [-50, 50, 10, 0.7], [0, 80, 0, 0.65],
-];
+const MAX_DECALS = 800; // bullet holes kept per round (CS2 keeps a few hundred)
+const MAX_SMOKES = 24; // smoke volumes kept built (seeking back reuses them)
 
 // First index whose tick (element [0]) is >= tick; lists are sorted by tick.
 function lowerBound(list, tick) {
@@ -25,6 +23,33 @@ function lowerBound(list, tick) {
     if (list[mid][0] < tick) lo = mid + 1; else hi = mid;
   }
   return lo;
+}
+
+/** A bullet hole: dark core, scorched rim, a few cracks. */
+function holeTexture() {
+  const size = 64;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = size;
+  const c = cv.getContext('2d');
+  const g = c.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'rgba(8,8,8,1)');
+  g.addColorStop(0.28, 'rgba(18,16,14,0.95)');
+  g.addColorStop(0.42, 'rgba(60,54,46,0.6)');
+  g.addColorStop(1, 'rgba(60,54,46,0)');
+  c.fillStyle = g;
+  c.fillRect(0, 0, size, size);
+  c.strokeStyle = 'rgba(20,18,16,0.55)';
+  c.lineWidth = 1.5;
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 + 0.4 * Math.sin(i * 7);
+    c.beginPath();
+    c.moveTo(32 + Math.cos(a) * 9, 32 + Math.sin(a) * 9);
+    c.lineTo(32 + Math.cos(a + 0.2) * 19, 32 + Math.sin(a + 0.2) * 19);
+    c.stroke();
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
 function pool(factory) {
@@ -43,29 +68,33 @@ function pool(factory) {
 }
 
 export class EffectsView {
-  constructor(scene, demo) {
+  /** ``getRay`` returns the map's MeshRaycaster (null without a map mesh). */
+  constructor(scene, demo, getRay = () => null) {
     this.demo = demo;
     this.rate = demo.tickRate;
     this.group = new THREE.Group();
     scene.add(this.group);
-    this.options = { grenades: true, tracers: true };
+    this.options = { grenades: true, tracers: true, holes: true };
+    this.getRay = getRay;
+    this.impacts = new ShotImpacts(demo, getRay);
     const g = this.group;
 
-    const puffGeo = new THREE.IcosahedronGeometry(1, 2);
-    const smokeMat = () => new THREE.MeshLambertMaterial({ color: 0xc3c8cf, transparent: true, opacity: 0.93, depthWrite: true });
-    this.smokes = pool(() => {
-      const grp = new THREE.Group();
-      const mat = smokeMat();
-      for (const [x, y, z, s] of SMOKE_PUFFS) {
-        const m = new THREE.Mesh(puffGeo, mat);
-        m.position.set(x, y, z);
-        m.scale.setScalar(95 * s);
-        grp.add(m);
-      }
-      grp.userData.mat = mat;
-      g.add(grp);
-      return grp;
-    });
+    // Smokes: voxel volumes (smoke.js), built when they first show up.
+    this.smokeGeo = new THREE.IcosahedronGeometry(1, 1);
+    this.smokeMat = new THREE.MeshLambertMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+    this.volumes = new Map(); // smoke -> SmokeVolume
+
+    // Bullet holes on walls.
+    const decalGeo = new THREE.PlaneGeometry(1, 1);
+    this.decals = new THREE.InstancedMesh(decalGeo, new THREE.MeshBasicMaterial({
+      map: holeTexture(), transparent: true, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4,
+    }), MAX_DECALS);
+    this.decals.count = 0;
+    this.decals.frustumCulled = false;
+    this.decals.renderOrder = 1;
+    this._decalKey = '';
+    g.add(this.decals);
 
     const discGeo = new THREE.CircleGeometry(1, 40);
     discGeo.rotateX(-Math.PI / 2);
@@ -129,9 +158,12 @@ export class EffectsView {
     this.bomb.add(this.bombRing);
     g.add(this.bomb);
 
-    this._st = new PlayerState();
+    this._m = new THREE.Matrix4();
+    this._q = new THREE.Quaternion();
     this._v1 = new THREE.Vector3();
     this._v2 = new THREE.Vector3();
+    this._z = new THREE.Vector3(0, 0, 1);
+    this._s = new THREE.Vector3();
   }
 
   update(tick, ctx) {
@@ -139,20 +171,7 @@ export class EffectsView {
     const fx = this.demo.effects;
     const roundStart = ctx.roundStart ?? -Infinity;
 
-    // Smokes
-    this.smokes.begin();
-    for (const s of fx.smokes || []) {
-      if (tick < s.start || tick > s.end || s.start < roundStart) continue;
-      const age = (tick - s.start) / rate;
-      const left = (s.end - tick) / rate;
-      const grow = 1 - Math.pow(1 - Math.min(1, age / 1.4), 3);
-      const fade = Math.min(1, left / 2);
-      const grp = this.smokes.next();
-      grp.position.set(s.pos[0], s.pos[2] + 10, -s.pos[1]);
-      grp.scale.set(grow, grow * 0.85, grow);
-      grp.userData.mat.opacity = 0.93 * fade;
-    }
-    this.smokes.end();
+    this._smokes(tick, roundStart);
 
     // Molotov / incendiary fires
     this.fires.begin();
@@ -188,6 +207,21 @@ export class EffectsView {
     };
     burst(fx.flashes, 0xffffff, 110, 0.35);
     burst(fx.hes, 0xff6a2a, 170, 0.55);
+    // Dust where bullets hit walls.
+    if (this.options.tracers || this.options.holes) {
+      const shots = this.demo.shots;
+      for (let i = lowerBound(shots, tick - 0.16 * rate); i < shots.length && shots[i][0] <= tick; i++) {
+        const imp = this.impacts.get(i);
+        if (!imp || !imp.wall) continue;
+        const k = (tick - imp.tick) / (0.16 * rate);
+        const m = this.bursts.next();
+        m.material.color.setHex(0xb8b0a0);
+        m.material.opacity = (1 - k) * 0.7;
+        m.scale.setScalar(3 + 9 * Math.sqrt(k));
+        const t = imp.wall.t - 2;
+        m.position.set(imp.o[0] + imp.d[0] * t, imp.o[1] + imp.d[1] * t, imp.o[2] + imp.d[2] * t);
+      }
+    }
     this.bursts.end();
 
     // Grenades in flight (+ fading trail)
@@ -239,7 +273,80 @@ export class EffectsView {
     this.trails.end();
 
     this._tracers(tick);
+    this._decals(tick, roundStart, ctx.cut ?? 1e6);
     this._bomb(tick, ctx);
+  }
+
+  /** Smoke volumes of this round, with bullet tunnels and HE blowouts. */
+  _smokes(tick, roundStart) {
+    const rate = this.rate;
+    const fx = this.demo.effects;
+    let shots = null;
+    const live = new Set();
+    for (const s of fx.smokes || []) {
+      if (tick < s.start || tick > s.end || s.start < roundStart) continue;
+      live.add(s);
+      let vol = this.volumes.get(s);
+      if (!vol) {
+        vol = new SmokeVolume(s, this.getRay(), this.smokeGeo, this.smokeMat);
+        this.group.add(vol.mesh);
+        this.volumes.set(s, vol);
+      }
+      if (!shots) shots = this._recentShots(tick, HOLE_SECONDS);
+      const near = shots.filter((sh) => vol.near(sh.o, sh.d, sh.len));
+      const c = vol.center;
+      const hes = (fx.hes || []).filter((h) => h.tick <= tick && h.tick >= tick - HE_SECONDS * rate
+        && Math.hypot(h.pos[0] - c.x, h.pos[2] - c.y, -h.pos[1] - c.z) < SMOKE_REACH + HE_REACH);
+      vol.update(tick, rate, near, hes);
+      vol.mesh.visible = true;
+    }
+    for (const [s, vol] of this.volumes) {
+      if (live.has(s)) continue;
+      vol.mesh.visible = false;
+      if (this.volumes.size > MAX_SMOKES) {
+        vol.dispose();
+        this.volumes.delete(s);
+      }
+    }
+  }
+
+  /** Bullets fired in the last ``seconds``: [{key, tick, o, d, len}]. */
+  _recentShots(tick, seconds) {
+    const shots = this.demo.shots;
+    const out = [];
+    for (let i = lowerBound(shots, tick - seconds * this.rate); i < shots.length && shots[i][0] <= tick; i++) {
+      const imp = this.impacts.get(i);
+      if (imp) out.push({ key: i, tick: imp.tick, o: imp.o, d: imp.d, len: imp.len });
+    }
+    return out;
+  }
+
+  /** Bullet holes from this round's shots so far (above the roof cut hidden). */
+  _decals(tick, roundStart, cut) {
+    const shots = this.demo.shots;
+    const from = lowerBound(shots, roundStart);
+    const to = lowerBound(shots, tick + 1e-6);
+    const key = this.options.holes ? `${from}:${to}:${Math.round(cut)}` : '';
+    if (key === this._decalKey) return;
+    this._decalKey = key;
+    let n = 0;
+    if (this.options.holes) {
+      const m = this._m, q = this._q, p = this._v1, nrm = this._v2;
+      for (let i = to - 1; i >= from && n < MAX_DECALS; i--) {
+        const imp = this.impacts.get(i);
+        if (!imp || !imp.wall) continue;
+        const t = imp.wall.t;
+        p.set(imp.o[0] + imp.d[0] * t, imp.o[1] + imp.d[1] * t, imp.o[2] + imp.d[2] * t);
+        if (p.y > cut) continue;
+        nrm.fromArray(imp.wall.n);
+        p.addScaledVector(nrm, 0.25);
+        q.setFromUnitVectors(this._z, nrm);
+        const size = 4 + (i % 5) * 0.35;
+        this.decals.setMatrixAt(n++, m.compose(p, q, this._s.set(size, size, 1)));
+      }
+    }
+    this.decals.count = n;
+    this.decals.instanceMatrix.needsUpdate = true;
   }
 
   _tracers(tick) {
@@ -251,28 +358,16 @@ export class EffectsView {
       const life = 0.09 * this.rate;
       const shots = this.demo.shots;
       const lo = lowerBound(shots, tick - life);
-      const st = this._st, eye = this._v1, dir = this._v2;
+      const eye = this._v1, dir = this._v2;
       for (let i = lo; i < shots.length && n < this.maxTracers; i++) {
-        const [t, p, weapon] = shots[i];
+        const t = shots[i][0];
         if (t > tick) break;
-        if (!firesBullets(weapon)) continue;
-        this.demo.state(p, t, st);
-        if (!st.alive) continue;
-        PlayersView.eye(st, eye);
-        PlayersView.viewDir(st, dir);
+        const imp = this.impacts.get(i);
+        if (!imp) continue;
+        eye.fromArray(imp.o);
+        dir.fromArray(imp.d);
         eye.y -= 6;
-        let len = 3000;
-        const hurts = this.demo.hurts;
-        for (let j = lowerBound(hurts, t - 2); j < hurts.length; j++) {
-          const h = hurts[j];
-          if (h[0] > t + 2) break;
-          if (h[1] === p) {
-            const vs = this.demo.state(h[2], t, new PlayerState());
-            const dx = vs.x - st.x, dy = vs.y - st.y, dz = vs.z + 40 - (st.z + 58);
-            len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-            break;
-          }
-        }
+        const len = imp.len;
         const k = 1 - (tick - t) / life;
         const o = n * 6;
         pos[o] = eye.x + dir.x * 20; pos[o + 1] = eye.y + dir.y * 20; pos[o + 2] = eye.z + dir.z * 20;

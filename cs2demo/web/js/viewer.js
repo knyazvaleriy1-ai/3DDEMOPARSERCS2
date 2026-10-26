@@ -53,7 +53,7 @@ export class Viewer {
     this.focus = -1;
     this.settings = {
       roofCut: 'auto', cutHeight: 400, labels: true, xray: true, grenades: true, tracers: true,
-      shadows: true, grid: false, radar: false, viewmodel: true, detail: true, keys: loadKeysSetting(),
+      shadows: true, grid: false, radar: false, viewmodel: true, detail: true, holes: true, keys: loadKeysSetting(),
       voice: loadVoiceSetting(),
     };
     this.voiceHud = null; // voice mode shown by the HUD while recording (else settings.voice)
@@ -132,7 +132,7 @@ export class Viewer {
     ]);
     this.players = new PlayersView(this.scene, demo, assets);
     this.viewmodel = assets ? new Viewmodel() : null;
-    this.effects = new EffectsView(this.scene, demo);
+    this.effects = new EffectsView(this.scene, demo, () => this.map.raycaster());
     this.demo = demo;
     this.applySettings();
     this.bounds = bounds;
@@ -204,6 +204,7 @@ export class Viewer {
     this.players.options.xray = this.settings.xray;
     this.effects.options.grenades = this.settings.grenades;
     this.effects.options.tracers = this.settings.tracers;
+    this.effects.options.holes = this.settings.holes;
   }
 
   // -- playback --------------------------------------------------------------------
@@ -351,7 +352,7 @@ export class Viewer {
     this.players.update(tick, this.states, {
       hidden: cam.hidden, selected: this.focus, bombCarrier: carrier, roundStart,
     });
-    this.effects.update(tick, { roundStart, bomb });
+    this.effects.update(tick, { roundStart, bomb, cut: cam.cut });
     this.map.setCut(cam.cut);
     this.map.follow(this.camera);
     this.renderer.render(this.scene, this.camera);
