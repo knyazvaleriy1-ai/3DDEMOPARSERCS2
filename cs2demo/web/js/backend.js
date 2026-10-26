@@ -23,11 +23,16 @@ export async function fetchMapMesh(mapName) {
     const res = await fetch(`/api/maps/${mapName}/mesh`);
     return res.ok ? res.arrayBuffer() : null;
   }
-  // Pre-gzipped: GitHub Pages does not compress unknown binary types.
+  // Pre-gzipped: static hosts don't compress unknown binary types. Some send
+  // .gz files with Content-Encoding: gzip, and the browser has already
+  // unpacked them: only decompress what still starts with the gzip magic.
   const res = await fetch(`assets/maps/${mapName}/mesh.bin.gz`);
   if (!res.ok) return null;
+  const buf = await res.arrayBuffer();
+  const head = new Uint8Array(buf, 0, Math.min(2, buf.byteLength));
+  if (head[0] !== 0x1f || head[1] !== 0x8b) return buf;
   if (typeof DecompressionStream === 'undefined') throw new Error('браузер не умеет распаковывать gzip');
-  return new Response(res.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+  return new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
 }
 
 // -- IndexedDB library ------------------------------------------------------------------

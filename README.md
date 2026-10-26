@@ -38,7 +38,8 @@
 
 ## Веб-версия: без установки, в том числе с телефона
 
-**https://knyazvaleriy1-ai.github.io/3DDEMOPARSERCS2/**
+**https://knyazvaleriy1-ai.github.io/3DDEMOPARSERCS2/** (GitHub Pages) или свой
+адрес на Vercel — как опубликовать, см. [«Публикация сайта»](#публикация-сайта).
 
 Откройте ссылку, нажмите «Открыть .dem» и выберите файл демо. Ничего не
 загружается на сервер: демо разбирает прямо в браузере тот же парсер
@@ -57,13 +58,27 @@
 - Чего нет в веб-версии: рендера на сервере, папки-наблюдателя и склейки нарезки —
   для этого нужна обычная (Python) версия.
 
-Сайт собирается из этого репозитория автоматически при каждом пуше в `master`
-(GitHub Actions → GitHub Pages, см. `.github/workflows/pages.yml`). Один раз
-нужно включить Pages: **Settings → Pages → Build and deployment → Source:
-GitHub Actions**, затем перезапустить последний запуск «Web version (GitHub
-Pages)» во вкладке **Actions** (или просто сделать следующий пуш). Собрать его
-вручную: `python scripts/build_site.py site/` и раздать папку `site/` любым
-статическим сервером. WebAssembly-парсер лежит в `cs2demo/web/vendor/demoparser/`;
+### Публикация сайта
+
+Сайт — статические файлы; собрать его вручную: `python scripts/build_site.py site/`
+и раздать папку `site/` любым статическим сервером (в корне домена или в
+подпапке — все пути относительные). Готовые варианты:
+
+**Vercel.** [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fknyazvaleriy1-ai%2F3DDEMOPARSERCS2)
+— или на vercel.com: **Add New → Project → Import** этот репозиторий →
+**Deploy**, ничего не меняя: настройки берутся из `vercel.json` (сборка
+`scripts/vercel_build.sh` → папка `dist/`, кэширование ассетов). При сборке
+Vercel скачивает карты из awpy-data и модель игрока (~1 минута). Дальше каждый
+пуш в `master` публикуется автоматически, а для каждого pull request Vercel
+делает отдельную preview-ссылку.
+
+**GitHub Pages.** Собирается при каждом пуше в `master` (GitHub Actions, см.
+`.github/workflows/pages.yml`). Один раз нужно включить Pages: **Settings →
+Pages → Build and deployment → Source: GitHub Actions**, затем перезапустить
+последний запуск «Web version (GitHub Pages)» во вкладке **Actions** (или
+просто сделать следующий пуш).
+
+WebAssembly-парсер лежит в `cs2demo/web/vendor/demoparser/`;
 пересобрать его — `wasm/build.sh` (нужны Rust с таргетом `wasm32-unknown-unknown`
 и `wasm-bindgen-cli` 0.2.100).
 
