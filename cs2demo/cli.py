@@ -143,7 +143,7 @@ def _render_opts(args: argparse.Namespace) -> dict:
         raise SystemExit("--res в формате 1280x720") from exc
     return {"width": width, "height": height, "fps": args.fps, "pov": args.pov,
             "slowmo": args.slowmo, "hud": not args.no_hud, "sound": not args.no_sound, "keys": args.keys,
-            "detail": args.quality}
+            "voice": args.voice, "detail": args.quality}
 
 
 def cmd_render(args: argparse.Namespace) -> None:
@@ -254,6 +254,8 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-hud", action="store_true", help="без HUD и килфида")
     p.add_argument("--no-sound", action="store_true", help="без звука")
     p.add_argument("--keys", action="store_true", help="экранная клавиатура: какие клавиши жмёт игрок")
+    p.add_argument("--voice", choices=["all", "team", "player", "T", "CT", "off"], default="team",
+                   help="войс игроков из демо (FACEIT и др.): все / команда игрока / только он / сторона / выкл")
     p.add_argument("--quality", choices=["auto", "low", "high"], default="auto",
                    help="материалы карты: auto — полные на GPU, упрощённые на CPU")
 

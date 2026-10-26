@@ -9,6 +9,7 @@ import { EffectsView } from './effects.js';
 import { Hud } from './hud.js';
 import { LiveAudio } from './audio.js';
 import { clamp } from './util.js';
+import { VOICE_MODES, voiceFilter } from './voice.js';
 
 const POV_FOV = 73.74; // CS2: 90° horizontal at 4:3
 const FREE_FOV = 55;
@@ -53,7 +54,9 @@ export class Viewer {
     this.settings = {
       roofCut: 'auto', cutHeight: 400, labels: true, xray: true, grenades: true, tracers: true,
       shadows: true, grid: false, radar: false, viewmodel: true, detail: true, keys: loadKeysSetting(),
+      voice: loadVoiceSetting(),
     };
+    this.voiceHud = null; // voice mode shown by the HUD while recording (else settings.voice)
     this.settings.detail = !this.softwareGL;
     this.clip = null; // highlight shown with a title card (recording)
     this.fixedSize = null;
@@ -171,6 +174,14 @@ export class Viewer {
   setKeys(on) {
     this.settings.keys = !!on;
     saveKeysSetting(this.settings.keys);
+    this._emit('settings');
+  }
+
+  /** Whose voice chat is heard and shown (voice.js VOICE_MODES; remembered). */
+  setVoice(mode) {
+    if (!VOICE_MODES.includes(mode)) return;
+    this.settings.voice = mode;
+    try { localStorage.setItem(VOICE_SETTING, mode); } catch (_) { /* private mode */ }
     this._emit('settings');
   }
 
@@ -311,7 +322,8 @@ export class Viewer {
     }
     this.update(dt);
     if (this.audio) {
-      this.audio.frame(this.demo, this.tick, this.playing, this.speed, this._listener(), this.mode === 'pov' ? this.focus : -1);
+      this.audio.frame(this.demo, this.tick, this.playing, this.speed, this._listener(), this.mode === 'pov' ? this.focus : -1,
+        { mode: this.settings.voice, focus: this.focus });
     }
     this._emit('frame');
   }
@@ -358,7 +370,23 @@ export class Viewer {
       povState: this.focus >= 0 ? this.states[this.focus] : null,
       blind: pov ? d.blindAt(this.focus, tick) : 0,
       clip: this.clip,
+      voice: this._speaking(tick),
     });
+  }
+
+  /** Players heard on voice chat right now: [{name, side, self}] (null: no voice). */
+  _speaking(tick) {
+    const d = this.demo;
+    const mode = this.voiceHud ?? this.settings.voice;
+    if (!d.voice.available || mode === 'off') return null;
+    const key = `${mode}:${this.focus}`;
+    if (this._voiceKey !== key) {
+      this._voiceKey = key;
+      this._voiceAllow = voiceFilter(d, mode, this.focus);
+    }
+    return d.voice.speakingAt(tick, this._voiceAllow).map((p) => ({
+      name: d.players[p]?.name || '', side: this.states[p].side, self: p === this.focus,
+    }));
   }
 
   /** What the on-screen keyboard shows for the followed player. */
@@ -542,6 +570,14 @@ export class Viewer {
 }
 
 const KEYS_SETTING = 'cs2demo.keys';
+const VOICE_SETTING = 'cs2demo.voice';
+
+function loadVoiceSetting() {
+  try {
+    const v = localStorage.getItem(VOICE_SETTING);
+    return VOICE_MODES.includes(v) ? v : 'all';
+  } catch (_) { return 'all'; }
+}
 
 function loadKeysSetting() {
   try { return localStorage.getItem(KEYS_SETTING) === '1'; } catch (_) { return false; }

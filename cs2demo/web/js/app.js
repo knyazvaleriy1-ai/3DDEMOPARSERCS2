@@ -2,7 +2,8 @@
 import { loadDemo } from './demo.js';
 import { Viewer } from './viewer.js';
 import { Timeline } from './timeline.js';
-import { ClipsPanel, HighlightsPanel, PlayersPanel, ViewPanel } from './panels.js';
+import { ClipsPanel, HighlightsPanel, PlayersPanel, ViewPanel, voiceNote, voiceOptions } from './panels.js';
+import { VOICE_LABELS, VOICE_MODES } from './voice.js';
 import { installRenderApi } from './clips.js';
 import {
   STATIC, demoIdFor, extractEntry, isArchive, isDemoFile, library, listArchive, parseFile,
@@ -72,6 +73,7 @@ class App {
     this.highlightsPanel.reset();
     this.clipsPanel.refresh();
     this.viewPanel.render();
+    this._syncVoice();
     this._refreshUi();
   }
 
@@ -298,9 +300,12 @@ class App {
     };
     $('btn-sound').onclick = () => { audio.ensure(); audio.setMuted(!audio.muted); syncSound(); };
     $('btn-keys').onclick = () => v.setKeys(!v.settings.keys);
+    $('voice-select').innerHTML = voiceOptions(v.settings.voice);
+    $('voice-select').onchange = (e) => { audio.ensure(); v.setVoice(e.target.value); };
     v.on((type) => {
       if (type !== 'settings') return;
       $('btn-keys').classList.toggle('active', v.settings.keys);
+      $('voice-select').value = v.settings.voice;
       this.viewPanel.render();
     });
     $('btn-keys').classList.toggle('active', v.settings.keys);
@@ -324,12 +329,35 @@ class App {
         case 'Escape': this.hideLibrary(); break;
         case 'KeyM': $('btn-sound').click(); break;
         case 'KeyK': v.setKeys(!v.settings.keys); break;
+        case 'KeyV': this._cycleVoice(); break;
         default: {
           const modes = { Digit1: 'free', Digit2: 'follow', Digit3: 'pov', Digit4: 'chase', Digit5: 'top', Digit6: 'overview' };
           if (modes[e.code]) v.setMode(modes[e.code]);
         }
       }
     });
+  }
+
+  _cycleVoice() {
+    const v = this.viewer;
+    if (!this.demo.voice.available) { toast(voiceNote(this.demo)); return; }
+    v.audio?.ensure();
+    const next = VOICE_MODES[(VOICE_MODES.indexOf(v.settings.voice) + 1) % VOICE_MODES.length];
+    v.setVoice(next);
+    toast(`Войс: ${VOICE_LABELS[next]}`);
+  }
+
+  /** Voice selector state for the open demo (and load the Opus decoder early). */
+  _syncVoice() {
+    const d = this.demo;
+    const sel = $('voice-select');
+    const has = !!d && d.voice.available;
+    sel.disabled = !has;
+    sel.parentElement.title = has
+      ? `Голосовой чат: ${d.voice.speakers.map((p) => d.players[p]?.name).join(', ')} (V — переключить)`
+      : d ? voiceNote(d) : '';
+    sel.parentElement.classList.toggle('off', !has);
+    if (has) d.voice.ready();
   }
 
   _speedStep(dir) {

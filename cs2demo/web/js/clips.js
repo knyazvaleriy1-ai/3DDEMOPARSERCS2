@@ -51,8 +51,10 @@ export class ClipDirector {
     this.saved = {
       mode: v.mode, focus: v.focus, tick: v.tick, playing: v.playing, clip: v.clip,
       fixed: v.fixedSize, target: v.controls.target.clone(), cam: v.camera.position.clone(), keys: v.settings.keys,
+      voiceHud: v.voiceHud,
     };
     if (this.opts.keys !== undefined) v.settings.keys = !!this.opts.keys;
+    v.voiceHud = this.voiceMode;
     v.pause();
     v.externalDriver = true;
     v.setFixedSize({ width: this.opts.width, height: this.opts.height });
@@ -77,6 +79,7 @@ export class ClipDirector {
     const s = this.saved;
     v.externalDriver = false;
     v.settings.keys = s.keys;
+    v.voiceHud = s.voiceHud;
     v.clip = s.clip;
     v.setFixedSize(s.fixed);
     v.tick = s.tick;
@@ -89,10 +92,20 @@ export class ClipDirector {
 
   get fileName() { return `${this.h.id}-${this.opts.pov}`; }
 
+  /** Voice chat in the clip: the voice.js mode, 'off' without sound or voice data. */
+  get voiceMode() {
+    const mode = this.opts.voice || 'off';
+    return this.opts.sound && this.viewer.demo.voice.available ? mode : 'off';
+  }
+
   /** The clip's soundtrack (AudioBuffer) or null when sound is off / unsupported. */
   async audio() {
     if (!this.opts.sound || typeof OfflineAudioContext === 'undefined') return null;
-    if (!this._audio) this._audio = await renderClipAudio(this.viewer.demo, this.ticks, this.opts.fps, this.h.player);
+    if (!this._audio) {
+      this._audio = await renderClipAudio(this.viewer.demo, this.ticks, this.opts.fps, this.h.player, {
+        voice: this.voiceMode,
+      });
+    }
     return this._audio;
   }
 
@@ -102,6 +115,7 @@ export class ClipDirector {
       highlight: h.id, title: h.title, player: h.playerName, round: h.round, score: h.score,
       tags: h.tags, pov: o.pov, width: o.width, height: o.height, fps: o.fps,
       duration: +(this.count / o.fps).toFixed(2), codec: this.codec || null, audioCodec: this.audioCodec || null,
+      voice: this.voiceMode,
     };
   }
 }

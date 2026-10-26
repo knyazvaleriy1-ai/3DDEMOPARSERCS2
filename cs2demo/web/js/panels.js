@@ -5,6 +5,7 @@ import { ICONS } from './icons.js';
 import {
   ClipDirector, POV_LABELS, downloadBlob, exportMp4, exportRealtime, uploadClip, webCodecsSupported,
 } from './clips.js';
+import { VOICE_LABELS } from './voice.js';
 
 // -- Players ------------------------------------------------------------------------
 
@@ -134,6 +135,8 @@ export class HighlightsPanel {
           <select data-opt="res">${Object.keys(RESOLUTIONS).map((k) => `<option ${o.res === k ? 'selected' : ''}>${k}</option>`).join('')}</select>
           <label>FPS</label>
           <select data-opt="fps">${[30, 60].map((f) => `<option ${o.fps === f ? 'selected' : ''}>${f}</option>`).join('')}</select>
+          <label title="Голосовой чат игроков из демо (FACEIT и др.)">Войс</label>
+          <select data-opt="voice" ${d.voice.available ? '' : `disabled title="${esc(voiceNote(d))}"`}>${voiceOptions(o.voice)}</select>
         </div>
         <label class="check"><input type="checkbox" data-opt="slowmo" ${o.slowmo ? 'checked' : ''}> Замедление в момент киллов</label>
         <label class="check"><input type="checkbox" data-opt="hud" ${o.hud ? 'checked' : ''}> HUD, килфид и титры</label>
@@ -292,7 +295,7 @@ export class HighlightsPanel {
         const h = list[i];
         const director = new ClipDirector(this.viewer, h, {
           pov: this.opts.pov, fps, width, height, slowmo: this.opts.slowmo, hud: this.opts.hud, sound: this.opts.sound,
-          keys: this.opts.keys,
+          keys: this.opts.keys, voice: this.opts.voice,
         });
         const label = `Клип ${i + 1}/${list.length}: ${h.title}`;
         const onProgress = (f) => {
@@ -337,7 +340,8 @@ export class HighlightsPanel {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clips: ids, pov: this.opts.pov, width, height, fps: this.opts.fps,
-          slowmo: this.opts.slowmo, hud: this.opts.hud, sound: this.opts.sound, keys: this.opts.keys }),
+          slowmo: this.opts.slowmo, hud: this.opts.hud, sound: this.opts.sound, keys: this.opts.keys,
+          voice: this.opts.voice }),
       });
       this._status(`Рендер на сервере запущен (${res.clips.length} клип.)`);
       this._pollJob(res.job);
@@ -364,7 +368,9 @@ export class HighlightsPanel {
 }
 
 function loadOpts() {
-  const defaults = { pov: 'first', res: '720p', fps: 30, slowmo: false, hud: true, sound: true, keys: false, auto: false };
+  const defaults = {
+    pov: 'first', res: '720p', fps: 30, slowmo: false, hud: true, sound: true, keys: false, voice: 'team', auto: false,
+  };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem('cs2demo.rec') || '{}') };
   } catch (_) {
@@ -374,6 +380,18 @@ function loadOpts() {
 
 function saveOpts(o) {
   try { localStorage.setItem('cs2demo.rec', JSON.stringify(o)); } catch (_) { /* private mode */ }
+}
+
+/** <option>s for a voice mode select. */
+export function voiceOptions(selected) {
+  return Object.entries(VOICE_LABELS)
+    .map(([k, v]) => `<option value="${k}" ${selected === k ? 'selected' : ''}>${esc(v)}</option>`).join('');
+}
+
+/** Why a demo has no voice to offer. */
+export function voiceNote(demo) {
+  if (!demo.voiceParsed) return 'Демо разобрано старой версией: откройте файл заново, чтобы достать войс';
+  return 'В этом демо нет голосового чата (обычно он есть в демках FACEIT; в демках HLTV его нет)';
 }
 
 // -- Clips library -------------------------------------------------------------------

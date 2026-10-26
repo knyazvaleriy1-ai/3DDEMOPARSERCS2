@@ -21,7 +21,7 @@ from .highlights import DEFAULTS as HIGHLIGHT_DEFAULTS
 from .highlights import detect_highlights
 from .jobs import JobRegistry, import_demo, is_parsed
 from .parser import load_meta
-from .recorder import POV_MODES, pick_highlights, playwright_available, render_highlights
+from .recorder import POV_MODES, VOICE_MODES, pick_highlights, playwright_available, render_highlights
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ class RenderRequest(BaseModel):
     hud: bool = True
     sound: bool = True
     keys: bool = False
+    voice: str = "team"
     quality: str = "auto"
 
 
@@ -405,6 +406,7 @@ def create_app() -> FastAPI:
             hud=req.hud,
             sound=req.sound,
             keys=req.keys,
+            voice=req.voice if req.voice in VOICE_MODES else "team",
             detail=req.quality if req.quality in ("auto", "low", "high") else "auto",
         )
         return {"job": key, "clips": [h["id"] for h in chosen]}

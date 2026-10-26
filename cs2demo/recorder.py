@@ -23,6 +23,9 @@ from .parser import load_meta
 log = logging.getLogger(__name__)
 
 POV_MODES = ("first", "third", "overview")
+# Whose voice chat goes into the clip (web/js/voice.js): everyone, the
+# clip player's team, only them, one side, nobody.
+VOICE_MODES = ("all", "team", "player", "T", "CT", "off")
 
 ProgressFn = Callable[[float, str], None]
 
@@ -82,6 +85,7 @@ def render_highlights(
     hud: bool = True,
     sound: bool = True,
     keys: bool = False,
+    voice: str = "team",
     quality: float = 0.9,
     detail: str = "auto",
     badge: str | None = None,
@@ -95,6 +99,8 @@ def render_highlights(
     progress = progress or (lambda f, m: None)
     if pov not in POV_MODES:
         raise ValueError(f"pov must be one of {POV_MODES}")
+    if voice not in VOICE_MODES:
+        raise ValueError(f"voice must be one of {VOICE_MODES}")
     if not highlights:
         return []
     out_dir = storage.clips_dir(demo_id)
@@ -137,7 +143,7 @@ def render_highlights(
             total = len(highlights)
             for n, h in enumerate(highlights):
                 opts = {"pov": pov, "fps": fps, "slowmo": slowmo, "hud": hud, "sound": sound, "quality": quality,
-                        "keys": keys, "badge": badge, "match": match}
+                        "keys": keys, "voice": voice, "badge": badge, "match": match}
                 info = page.evaluate("([id, opts]) => window.cs2render.begin(id, opts)", [h["id"], opts])
                 frames = int(info["frames"])
                 dest = out_dir / f"{h['id']}-{pov}{suffix}.mp4"
@@ -183,6 +189,7 @@ def render_highlights(
                     "slowmo": slowmo,
                     "hud": hud,
                     "keys": keys,
+                    "voice": voice if wav else "off",
                     "detail": detail,
                     "badge": badge,
                     "match": match,

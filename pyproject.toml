@@ -32,7 +32,8 @@ packages = ["cs2demo"]
 [tool.setuptools.package-data]
 cs2demo = [
     "web/*.html", "web/css/*", "web/js/*", "web/js/parse/*", "web/vendor/*", "web/vendor/demoparser/*",
-    "web/vendor/unrar/*", "web/vendor/mediabunny/*", "unrar_cli.mjs",
+    "web/vendor/unrar/*", "web/vendor/mediabunny/*", "web/vendor/opus/*",
+    "unrar_cli.mjs",
 ]
 
 [tool.pytest.ini_options]

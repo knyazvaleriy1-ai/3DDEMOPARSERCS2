@@ -3,8 +3,12 @@
 //
 // Users can replace any sound with their own file: put e.g. ``ak47.wav`` into
 // ``<data>/sounds/`` (names: see SOUND_NAMES) and it is used instead.
+//
+// Players' voice chat (when the demo has it, see voice.js) is mixed in too,
+// unpositioned like a radio, filtered by team / player.
 import { urls } from './backend.js';
 import { firesBullets, weaponIcon } from './util.js';
+import { VOICE_SAMPLE_RATE, voiceBuffer, voiceFilter } from './voice.js';
 
 export const SOUND_NAMES = [
   'rifle', 'ak47', 'm4', 'silenced', 'sniper', 'auto_sniper', 'pistol', 'deagle', 'smg', 'shotgun', 'lmg',
@@ -348,6 +352,7 @@ export function shotSound(weapon) {
   return 'rifle';
 }
 
+const VOICE_GAIN = 1.1;
 const LOUD = { sniper: 1.25, deagle: 1.1, shotgun: 1.15, he: 1.5, c4_explode: 2.2, flash: 1.3, smoke: 0.7, molotov: 1.0 };
 const RANGE = { step: 900, hit: 900, headshot: 1600, throw: 700, knife: 700, silenced: 1400, bomb_beep: 2200, fire_loop: 1200 };
 
@@ -514,6 +519,8 @@ export class LiveAudio {
       if (typeof saved.muted === 'boolean') this.muted = saved.muted;
     } catch (_) { /* private mode */ }
     this.fires = new Map();
+    this.voiceSources = new Map(); // spurt -> playing source
+    this.voiceKey = '';
     this.lastTick = null;
     const unlock = () => this.ensure();
     window.addEventListener('pointerdown', unlock, { once: true, capture: true });
@@ -530,6 +537,9 @@ export class LiveAudio {
     this.ctx = new AC({ latencyHint: 'interactive' });
     this.master = this.ctx.createGain();
     this.master.connect(this.ctx.destination);
+    this.voiceGain = this.ctx.createGain();
+    this.voiceGain.gain.value = VOICE_GAIN;
+    this.voiceGain.connect(this.master);
     this._applyVolume();
     this.bank = new SoundBank(this.ctx);
     this.bank.loadOverrides();
@@ -541,11 +551,15 @@ export class LiveAudio {
   _applyVolume() { if (this.master) this.master.gain.value = this.muted ? 0 : this.volume; }
   _save() { try { localStorage.setItem('cs2demo.audio', JSON.stringify({ volume: this.volume, muted: this.muted })); } catch (_) { /* ignore */ } }
 
-  /** Called every frame by the viewer. */
-  frame(demo, tick, playing, speed, listener, listenerPlayer) {
+  /**
+   * Called every frame by the viewer. ``voice`` = {mode, focus}: whose voice
+   * chat is heard (see voice.js).
+   */
+  frame(demo, tick, playing, speed, listener, listenerPlayer, voice = null) {
     const prev = this.lastTick;
     this.lastTick = tick;
     const ctx = this.ctx;
+    this._voice(demo, prev, tick, playing, speed, voice);
     if (!ctx || ctx.state !== 'running' || this.muted || !playing || speed > 4 || prev === null || tick <= prev || tick - prev > demo.tickRate) {
       if (!playing || speed > 4) this.stopFires();
       return;
@@ -587,9 +601,55 @@ export class LiveAudio {
     this.fires.clear();
   }
 
+  /** Start the talk spurts that begin now (or, after a jump, are under way). */
+  _voice(demo, prev, tick, playing, speed, opts) {
+    const ctx = this.ctx;
+    const track = demo.voice;
+    const on = ctx && ctx.state === 'running' && !this.muted && playing && speed >= 0.5 && speed <= 2
+      && opts && opts.mode && opts.mode !== 'off' && track.available;
+    if (!on) {
+      this.stopVoice();
+      return;
+    }
+    if (!track.isReady) {
+      track.ready();
+      return;
+    }
+    const key = `${opts.mode}:${opts.focus}:${speed}`;
+    const jumped = prev === null || tick < prev || tick - prev > demo.tickRate || key !== this.voiceKey;
+    if (jumped) {
+      this.stopVoice();
+      this.voiceKey = key;
+      this._voiceAllow = voiceFilter(demo, opts.mode, opts.focus);
+    }
+    const list = jumped ? track.overlapping(tick, tick) : track.starting(prev, tick);
+    for (const s of list) {
+      if (this.voiceSources.has(s) || !this._voiceAllow(s.player, s.tick)) continue;
+      const pcm = track.pcm(s);
+      const offset = Math.max(0, (tick - s.tick) / demo.tickRate); // seconds already spoken
+      if (offset >= pcm.length / VOICE_SAMPLE_RATE - 0.02) continue;
+      const src = ctx.createBufferSource();
+      src.buffer = voiceBuffer(ctx, pcm);
+      src.playbackRate.value = speed;
+      src.connect(this.voiceGain);
+      src.onended = () => { if (this.voiceSources.get(s) === src) this.voiceSources.delete(s); };
+      src.start(ctx.currentTime + 0.02, offset);
+      this.voiceSources.set(s, src);
+    }
+  }
+
+  stopVoice() {
+    for (const src of this.voiceSources.values()) {
+      try { src.stop(); } catch (_) { /* not started */ }
+    }
+    this.voiceSources.clear();
+    this.voiceKey = '';
+  }
+
   reset() {
     this.lastTick = null;
     this.stopFires();
+    this.stopVoice();
   }
 }
 
@@ -597,9 +657,11 @@ export class LiveAudio {
 
 /**
  * Render the soundtrack of a clip. ``ticks`` maps output frame -> demo tick
- * (slow motion stretches time), the listener is ``player``'s head.
+ * (slow motion stretches time, fast-forward squeezes it: game sounds are left
+ * out where the clip runs faster than 1.5x), the listener is ``player``'s head.
+ * ``voice``: whose voice chat to mix in (voice.js modes, around ``player``).
  */
-export async function renderClipAudio(demo, ticks, fps, player, sampleRate = 48000) {
+export async function renderClipAudio(demo, ticks, fps, player, { sampleRate = 48000, voice = 'off' } = {}) {
   const duration = ticks.length / fps;
   const ctx = new OfflineAudioContext(2, Math.ceil(duration * sampleRate), sampleRate);
   const bank = await new SoundBank(ctx).loadOverrides();
@@ -625,21 +687,61 @@ export async function renderClipAudio(demo, ticks, fps, player, sampleRate = 480
   };
   for (const e of collectEvents(demo, t0 - 1e-6, t1, player)) {
     const buf = bank.get(e.name);
+    const speed = localSpeed(e.tick);
+    if (!buf || speed > 1.5) continue;
     const sp = spatial(listenerAt(e.tick), e.pos, e.name);
-    if (!buf || !sp) continue;
-    const rate = Math.max(0.55, Math.min(1, localSpeed(e.tick)));
+    if (!sp) continue;
+    const rate = Math.max(0.55, Math.min(1, speed));
     play(ctx, master, buf, timeOf(e.tick), sp, (LOUD[e.name] || 1) * e.gain * 0.8, rate);
   }
   for (const f of demo.effects?.infernos || []) {
     if (f.end <= t0 || f.start >= t1) continue;
     const start = timeOf(Math.max(f.start, t0)), end = timeOf(Math.min(f.end, t1));
     const sp = spatial(listenerAt(Math.max(f.start, t0)), f.pos, 'fire_loop');
-    if (!sp || end <= start) continue;
+    if (!sp || end - start < 0.3 * ((Math.min(f.end, t1) - Math.max(f.start, t0)) / demo.tickRate)) continue;
     const node = play(ctx, master, bank.get('fire_loop'), start, sp, 0.6);
     node.src.loop = true;
     node.src.stop(end);
   }
+  await mixVoice(ctx, demo, ticks, timeOf, voice, player);
   return ctx.startRendering();
+}
+
+/**
+ * Voice chat for a clip. Speech always plays at normal speed from the moment
+ * it starts in the clip (slow motion and fast-forward don't pitch it); a
+ * player's next spurt waits for the previous one, or is dropped when it would
+ * come more than 2 s late.
+ */
+async function mixVoice(ctx, demo, ticks, timeOf, mode, focus) {
+  const allow = voiceFilter(demo, mode, focus);
+  const track = demo.voice;
+  if (!allow || !track.available || !(await track.ready())) return;
+  const t0 = ticks[0], t1 = ticks[ticks.length - 1];
+  const out = ctx.createGain();
+  out.gain.value = VOICE_GAIN;
+  out.connect(ctx.destination);
+  const busy = new Map(); // player -> time their audio ends
+  const rate = demo.tickRate;
+  for (const s of track.overlapping(t0, t1)) {
+    if (!allow(s.player, s.tick)) continue;
+    const pcm = track.pcm(s);
+    const offset = Math.max(0, (t0 - s.tick) / rate);
+    const dur = pcm.length / VOICE_SAMPLE_RATE - offset;
+    if (dur <= 0.02) continue;
+    let at = timeOf(Math.max(s.tick, t0));
+    const free = busy.get(s.player) ?? 0;
+    if (free > at) {
+      if (free - at > 2) continue;
+      at = free;
+    }
+    if (at >= ctx.length / ctx.sampleRate) continue;
+    const src = ctx.createBufferSource();
+    src.buffer = voiceBuffer(ctx, pcm);
+    src.connect(out);
+    src.start(at, offset);
+    busy.set(s.player, at + dur);
+  }
 }
 
 /** 16-bit PCM WAV from an AudioBuffer. */
