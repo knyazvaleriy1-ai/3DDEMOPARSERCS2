@@ -72,6 +72,12 @@ Vercel скачивает карты из awpy-data и модель игрока
 пуш в `master` публикуется автоматически, а для каждого pull request Vercel
 делает отдельную preview-ссылку.
 
+Если сборка падает с «No entrypoint found» (или «No FastAPI entrypoint
+found»), значит, в собираемой ветке нет `vercel.json`: без него Vercel
+принимает репозиторий за сервер на Node.js/FastAPI и ищет `app.js`/`main.py`.
+`vercel.json` перекрывает пресет, выбранный в настройках проекта, так что
+менять там ничего не нужно — только собирать ветку, где он есть.
+
 **GitHub Pages.** Собирается при каждом пуше в `master` (GitHub Actions, см.
 `.github/workflows/pages.yml`). Один раз нужно включить Pages: **Settings →
 Pages → Build and deployment → Source: GitHub Actions**, затем перезапустить
