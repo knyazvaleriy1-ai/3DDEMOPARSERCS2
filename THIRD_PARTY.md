@@ -10,6 +10,7 @@
 | [node-unrar-js](https://github.com/YuJianrong/node-unrar.js) 2.0.2: the UnRAR library compiled to WebAssembly and its `Extractor` class (used by `cs2demo/web/js/parse/rar.js` and `cs2demo/unrar_cli.mjs` to open `.rar` archives) | `cs2demo/web/vendor/unrar/` | MIT, `node-unrar-js.LICENSE`; UnRAR by Alexander Roshal — freeware, may be used to handle RAR archives, `unrar.LICENSE` |
 | [opus-decoder](https://github.com/eshaz/wasm-audio-decoders) 0.7.12 — [libopus](https://opus-codec.org) compiled to WebAssembly, decodes the players' voice chat stored in demos | `cs2demo/web/vendor/opus/` | MIT; libopus BSD-3-Clause — both in `opus-decoder.LICENSE` |
 | [fzstd](https://github.com/101arrowz/fzstd) 0.1.1 — Zstandard decompressor in JavaScript, unpacks FACEIT demos (`.dem.zst`) in the browser | `cs2demo/web/vendor/fzstd/` | MIT, `fzstd.LICENSE` |
+| Sound recordings from [Kenney Impact Sounds](https://kenney.nl/assets/impact-sounds) 1.0 (footsteps, hits, helmet, grenade bounces, glass, bomb plant), trimmed, converted to mono 44.1 kHz WAV and loudness-normalised | `cs2demo/web/audio/` | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/), `cs2demo/web/audio/LICENSE.txt` |
 | Killfeed icons from [game-icons.net](https://game-icons.net), rotated and cropped by `scripts/build_icons.py` | `cs2demo/web/js/icons.js` | [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) |
 
 Icon authors (game-icons.net): **Skoll** — ak47, ak47u, fn-fal, famas, steyr-aug,

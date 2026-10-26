@@ -6,6 +6,7 @@ import {
   ClipDirector, POV_LABELS, downloadBlob, exportMp4, exportRealtime, uploadClip, webCodecsSupported,
 } from './clips.js';
 import { VOICE_LABELS } from './voice.js';
+import { setSoundPref, soundPrefs } from './audio.js';
 import { PovDirector } from './pov.js';
 
 const FF_LABELS = { 4: 'ускорять ×4', 8: 'ускорять ×8', 16: 'ускорять ×16', 0: 'вырезать' };
@@ -99,7 +100,7 @@ export class PlayersPanel {
 
 // -- Highlights + recording ------------------------------------------------------------
 
-const RESOLUTIONS = { '720p': [1280, 720], '1080p': [1920, 1080], '1440p': [2560, 1440], 'vertical': [1080, 1920] };
+export const RESOLUTIONS = { '720p': [1280, 720], '1080p': [1920, 1080], '1440p': [2560, 1440], 'vertical': [1080, 1920] };
 
 export class HighlightsPanel {
   constructor(el, app) {
@@ -181,7 +182,8 @@ export class HighlightsPanel {
     const players = d.players.map((p, i) => `<option value="${i}" ${o.povPlayer === i ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
     const n = d.rounds.length;
     const from = Math.min(o.povFrom || 1, n), to = Math.min(o.povTo || n, n);
-    const rounds = (sel) => d.rounds.map((r) => `<option value="${r.num}" ${r.num === sel ? 'selected' : ''}>${r.num}</option>`).join('');
+    const rounds = (sel) => d.rounds.filter((r) => !r.knife)
+      .map((r) => `<option value="${r.num}" ${r.num === sel ? 'selected' : ''}>${r.num}</option>`).join('');
     return `
       <div class="panel">
         <h3>POV игрока</h3>
@@ -206,7 +208,7 @@ export class HighlightsPanel {
   _povRounds() {
     const o = this.opts;
     const a = Math.min(o.povFrom || 1, o.povTo || 1e9), b = Math.max(o.povFrom || 1, o.povTo || 1e9);
-    return this.demo.rounds.map((r, i) => [r, i]).filter(([r]) => r.num >= a && r.num <= b).map(([, i]) => i);
+    return this.demo.rounds.map((r, i) => [r, i]).filter(([r]) => !r.knife && r.num >= a && r.num <= b).map(([, i]) => i);
   }
 
   /** Watch the POV live: first person, fast-forward after death, from the first chosen round. */
@@ -667,6 +669,12 @@ export class ViewPanel {
             .map(([k, t]) => `<option value="${k}" ${s.povFF === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       </div>
       <div class="panel">
+        <h3>Звук</h3>
+        <label class="check"><input type="checkbox" data-sfx="steps" ${soundPrefs.steps ? 'checked' : ''}> Шаги</label>
+        <label class="check"><input type="checkbox" data-sfx="hits" ${soundPrefs.hits ? 'checked' : ''}> Попадания и шлемы</label>
+        <p class="muted small">Громкость — ползунок 🔊 на панели воспроизведения. Действует и на записываемые клипы.</p>
+      </div>
+      <div class="panel">
         <h3>Крыши и потолки</h3>
         <select data-s="roofCut">
           <option value="auto" ${s.roofCut === 'auto' ? 'selected' : ''}>Авто: срезать над выбранным игроком</option>
@@ -692,6 +700,7 @@ export class ViewPanel {
       if (k === 'roofCut') this.el.querySelector('[data-s=cutHeight]').disabled = s.roofCut !== 'manual';
       this.viewer.applySettings();
     }));
+    this.el.querySelectorAll('[data-sfx]').forEach((input) => input.addEventListener('change', () => setSoundPref(input.dataset.sfx, input.checked)));
     this.el.querySelector('[data-act=reset]').onclick = () => { this.viewer.setMode('free', -1); this.viewer.resetCamera(); };
   }
 }

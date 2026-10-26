@@ -281,6 +281,31 @@ def cmd_pov(args: argparse.Namespace) -> None:
         print(f"\n  {r['path']}  ({r['duration']} с, раунды {rounds_done}, рендер {r['renderSeconds']} с)")
 
 
+def cmd_smokes(args: argparse.Namespace) -> None:
+    """Smoke lineups of a demo: list them, or record replays with the utility camera."""
+    from .recorder import BackgroundServer, playwright_available, render_smokes
+
+    if not playwright_available():
+        raise SystemExit("Нужен Playwright: pip install playwright && python -m playwright install chromium")
+    ids = [x.strip() for x in (args.ids or "").split(",") if x.strip()] or None
+    opts = _output_opts(args)
+    for demo_id in _resolve_demos(args.demo):
+        with BackgroundServer() as srv:
+            try:
+                res = render_smokes(demo_id, ids, base_url=srv.url, top=args.top, list_only=args.list,
+                                    progress=None if args.list else _render_progress, **opts)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+        if args.list:
+            for lu in res:
+                mark = "*" if lu["interesting"] else " "
+                print(f"{lu['score']:>4} {mark} {lu['id']:<44} {lu['title']:<34} {' · '.join(lu['tags'])}")
+            continue
+        print()
+        for r in res:
+            print(f"  {r['path']}  ({r['duration']} с)  {r['setpos']}")
+
+
 def _render_progress(fraction: float, message: str) -> None:
     print(f"\r[{fraction * 100:5.1f}%] {message[:110]:<110}", end="", flush=True)
 
@@ -366,6 +391,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="во сколько раз ускорять раунд после смерти игрока (0 — вырезать)")
     _add_output_args(p)
     p.set_defaults(func=cmd_pov)
+
+    p = sub.add_parser("smokes", help="лайнапы смоков: список и повторы с камерой гранаты в MP4")
+    p.add_argument("demo", help="id демо, путь к .dem / .rar / .dem.zst или ссылка на матч FACEIT")
+    p.add_argument("--list", action="store_true", help="только показать найденные смоки (* — лайнап)")
+    p.add_argument("--ids", help="id лайнапов через запятую (из --list)")
+    p.add_argument("--top", type=int, default=5, help="сколько лучших лайнапов записать (без --ids)")
+    _add_output_args(p)
+    p.set_defaults(func=cmd_smokes)
 
     p = sub.add_parser("watch", help="следить за папкой с демо и автоматически записывать клипы")
     p.add_argument("folder")

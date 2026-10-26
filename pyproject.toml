@@ -32,7 +32,7 @@ packages = ["cs2demo"]
 
 [tool.setuptools.package-data]
 cs2demo = [
-    "web/*.html", "web/css/*", "web/js/*", "web/js/parse/*", "web/vendor/*", "web/vendor/demoparser/*",
+    "web/*.html", "web/css/*", "web/audio/*", "web/js/*", "web/js/parse/*", "web/vendor/*", "web/vendor/demoparser/*",
     "web/vendor/unrar/*", "web/vendor/mediabunny/*", "web/vendor/opus/*",
     "web/vendor/fzstd/*",
     "unrar_cli.mjs",

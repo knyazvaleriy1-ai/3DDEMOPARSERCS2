@@ -330,6 +330,78 @@ def render_pov(
     return {**record, "file": dest.name, "path": str(dest)}
 
 
+def render_smokes(
+    demo_id: str,
+    ids: list[str] | None = None,
+    *,
+    base_url: str,
+    top: int = 5,
+    list_only: bool = False,
+    width: int = 1280,
+    height: int = 720,
+    fps: int = 30,
+    hud: bool = True,
+    sound: bool = True,
+    keys: bool = False,
+    voice: str = "team",
+    quality: float = 0.9,
+    detail: str = "auto",
+    progress: ProgressFn | None = None,
+) -> list[dict[str, Any]]:
+    """Replays of smoke lineups with the utility camera (the thrower's aim,
+    the grenade in flight, the bloom), one MP4 each: the lineups ``ids``, or
+    the ``top`` best ones the viewer marks as lineups. ``list_only`` returns
+    the lineups found without rendering."""
+    progress = progress or (lambda f, m: None)
+    if voice not in VOICE_MODES:
+        raise ValueError(f"voice must be one of {VOICE_MODES}")
+    out_dir = storage.clips_dir(demo_id)
+    results: list[dict[str, Any]] = []
+    with _viewer_page(demo_id, base_url, width, height, detail, progress) as page:
+        found = page.evaluate("() => window.cs2render.smokes()")
+        if list_only:
+            return found
+        if ids:
+            missing = set(ids) - {lu["id"] for lu in found}
+            if missing:
+                raise ValueError(f"нет лайнапов: {', '.join(sorted(missing))}")
+            chosen = [lu for lu in found if lu["id"] in ids]
+        else:
+            chosen = [lu for lu in found if lu["interesting"]][:top]
+        total = len(chosen)
+        for n, lu in enumerate(chosen):
+            opts = {"fps": fps, "hud": hud, "sound": sound, "keys": keys, "voice": voice, "quality": quality}
+            info = page.evaluate("([id, opts]) => window.cs2render.beginSmoke(id, opts)", [lu["id"], opts])
+            dest = out_dir / f"{info['file']}.mp4"
+            started = time.time()
+
+            def step(done: int, frames: int, what: str, n=n, lu=lu) -> None:
+                label = f"Смок {n + 1}/{total}: {lu['title']}"
+                if what:
+                    progress((n + 0.01) / total, f"{label}: {what}")
+                else:
+                    progress((n + done / frames) / total, f"{label} — кадр {done}/{frames}")
+
+            has_sound = _encode(page, dest, info, fps, sound, step)
+            frames = int(info["frames"])
+            record = {
+                **{k: v for k, v in info["info"].items() if k not in ("codec", "audioCodec")},
+                "sound": has_sound,
+                "voice": voice if has_sound else "off",
+                "keys": keys,
+                "hud": hud,
+                "detail": detail,
+                "duration": round(frames / fps, 2),
+                "renderSeconds": round(time.time() - started, 1),
+                "source": "headless",
+            }
+            write_sidecar(dest, record)
+            results.append({**record, "file": dest.name, "path": str(dest)})
+            log.info("rendered %s (%d frames)", dest, frames)
+    progress(1.0, f"Готово: {len(results)} смок(ов)")
+    return results
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

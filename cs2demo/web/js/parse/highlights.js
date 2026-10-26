@@ -126,6 +126,7 @@ export function detectClutches(meta) {
   });
   const out = [];
   rounds.forEach((r, rIdx) => {
+    if (r.knife) return;
     const startAlive = r.alive || {};
     const alive = { T: new Set(startAlive.T || []), CT: new Set(startAlive.CT || []) };
     if (!alive.T.size || !alive.CT.size) return;
@@ -177,6 +178,7 @@ export function detectHighlights(meta, options = {}) {
   kills.forEach((k, i) => {
     const a = k.attacker ?? -1;
     if (a < 0 || a === k.victim || k.teamkill || (k.round ?? -1) < 0) return;
+    if (k.round < rounds.length && rounds[k.round].knife) return;
     const key = `${k.round},${a}`;
     if (!groups.has(key)) groups.set(key, { round: k.round, player: a, idxs: [] });
     groups.get(key).idxs.push(i);

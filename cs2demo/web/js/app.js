@@ -9,6 +9,7 @@ import {
 } from './faceit.js';
 import { installRenderApi } from './clips.js';
 import { installPovRenderApi } from './pov.js';
+import { SmokesPanel, installSmokeRenderApi } from './smokes.js';
 import {
   STATIC, demoIdFor, demoName, extractEntry, isArchive, isCompressed, isDemoFile, library, listArchive, parseFile,
 } from './backend.js';
@@ -26,6 +27,7 @@ class App {
     this.timeline = new Timeline($('timeline'), this.viewer);
     this.playersPanel = new PlayersPanel($('tab-players'), this.viewer);
     this.highlightsPanel = new HighlightsPanel($('tab-highlights'), this);
+    this.smokesPanel = new SmokesPanel($('tab-smokes'), this);
     this.clipsPanel = new ClipsPanel($('tab-clips'), this);
     this.viewPanel = new ViewPanel($('tab-view'), this.viewer);
     this._bindUi();
@@ -72,9 +74,10 @@ class App {
     $('demo-title').innerHTML = `<b>${esc(m.map)}</b> · ${esc(m.file || '')} · ${d.rounds.length} раундов · ${fmtTime(d.duration)}`;
     document.title = `${m.map} — CS2 3D Demo Viewer`;
     $('round-select').innerHTML = d.rounds.map((r, i) =>
-      `<option value="${i}">Раунд ${r.num}${r.winner ? ` · ${r.winner}` : ''}</option>`).join('');
+      `<option value="${i}">${r.knife ? 'Ножевой раунд' : `Раунд ${r.num}`}${r.winner ? ` · ${r.winner}` : ''}</option>`).join('');
     this.playersPanel.reset();
     this.highlightsPanel.reset();
+    this.smokesPanel.reset();
     this.clipsPanel.refresh();
     this.viewPanel.render();
     this._syncVoice();
@@ -396,6 +399,7 @@ class App {
       document.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('active', x === b));
       document.querySelectorAll('.tab-body').forEach((t) => t.classList.toggle('hidden', t.id !== `tab-${b.dataset.tab}`));
       if (b.dataset.tab === 'clips') this.clipsPanel.refresh();
+      if (b.dataset.tab === 'smokes') this.smokesPanel.render();
       if (b.dataset.tab === 'view') this.viewPanel.render();
     }));
 
@@ -537,6 +541,7 @@ async function main() {
     document.body.classList.add('render-mode');
     const api = installRenderApi(app.viewer, () => app.demo);
     installPovRenderApi(api);
+    installSmokeRenderApi(api);
     try {
       const id = params.get('demo');
       app.viewer.setFixedSize({ width: window.innerWidth, height: window.innerHeight });

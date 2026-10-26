@@ -1,13 +1,20 @@
 // Voice chat recorded in the demo (FACEIT, ESEA and players' own POV demos;
-// GOTV demos of pro matches usually have none). The parser keeps the raw Opus
-// packets ("voice" + "voiceData" sections, one 10-20 ms frame each); they are
-// decoded here with libopus compiled to WebAssembly, one talk spurt at a time.
+// GOTV demos of pro matches usually have none). The parser keeps the raw
+// packets ("voice" + "voiceData" sections); they are decoded here with libopus
+// compiled to WebAssembly, one talk spurt at a time. Since the 2024 Arms Race
+// update a packet is one Opus frame; older demos use Steam's voice format
+// (a header, then several Opus frames), handled too.
+//
+// Speech is levelled per spurt (people talk at very different volumes) so it
+// stays clear over gunfire; audio.js also ducks the game while someone talks.
 
 const SAMPLE_RATE = 48000;
 // A packet arriving this many ticks after the audio decoded so far would end
 // starts a new spurt (aligned to its own tick, so timing never drifts).
 const GAP_TICKS = 6;
 const CACHE_SAMPLES = 60 * SAMPLE_RATE;
+const TARGET_RMS = 0.11; // ~ -19 dBFS speech
+const MAX_GAIN = 6;
 
 /** Who is heard: everyone, the followed player's team, only them, one side, nobody. */
 export const VOICE_MODES = ['all', 'team', 'player', 'T', 'CT', 'off'];
@@ -61,20 +68,16 @@ export class VoiceTrack {
 
   get speakers() { return [...new Set(this.spurts.map((s) => s.player))].sort((a, b) => a - b); }
 
-  /** Duration of packet ``i`` from its Opus TOC byte (10 ms when unknown). */
+  /** The Opus frames of packet ``i`` (one, or several in Steam's voice format). */
+  _frames(i) {
+    return opusFrames(this.data.subarray(this.offsets[i], this.offsets[i + 1]));
+  }
+
+  /** Duration of packet ``i`` from the Opus TOC bytes (10 ms when unknown). */
   _packetSeconds(i) {
-    const len = this.rows[i * 3 + 2];
-    if (!len) return 0.01;
-    const toc = this.data[this.offsets[i]];
-    const config = toc >> 3;
-    let frame;
-    if (config < 12) frame = [0.01, 0.02, 0.04, 0.06][config & 3];
-    else if (config < 16) frame = (config & 1) ? 0.02 : 0.01;
-    else frame = [0.0025, 0.005, 0.01, 0.02][config & 3];
-    const code = toc & 3;
-    if (code === 0) return frame;
-    if (code === 3) return frame * ((this.data[this.offsets[i] + 1] || 0) & 0x3f || 1);
-    return frame * 2;
+    const frames = this._frames(i);
+    if (!frames.length) return 0.01;
+    return frames.reduce((sum, f) => sum + opusSeconds(f), 0);
   }
 
   /** Load libopus and create a decoder per speaker (once). */
@@ -105,19 +108,20 @@ export class VoiceTrack {
     const parts = [];
     let total = 0;
     for (const i of s.packets) {
-      const bytes = this.data.subarray(this.offsets[i], this.offsets[i + 1]);
-      if (!bytes.length) continue;
-      try {
-        const r = dec.decodeFrame(bytes);
-        if (r.samplesDecoded) {
-          parts.push(r.channelData[0].slice(0, r.samplesDecoded));
-          total += r.samplesDecoded;
-        }
-      } catch (_) { /* corrupt packet: skip */ }
+      for (const frame of this._frames(i)) {
+        try {
+          const r = dec.decodeFrame(frame);
+          if (r.samplesDecoded) {
+            parts.push(r.channelData[0].slice(0, r.samplesDecoded));
+            total += r.samplesDecoded;
+          }
+        } catch (_) { /* corrupt packet: skip */ }
+      }
     }
     out = new Float32Array(total);
     let o = 0;
     for (const p of parts) { out.set(p, o); o += p.length; }
+    level(out);
     this.cache.set(s, out);
     this.cached += out.length;
     for (const [key, buf] of this.cache) {
@@ -163,6 +167,63 @@ export class VoiceTrack {
     }
     return out;
   }
+}
+
+/** Duration of one Opus packet from its TOC byte(s). */
+export function opusSeconds(bytes) {
+  if (!bytes.length) return 0.01;
+  const toc = bytes[0];
+  const config = toc >> 3;
+  let frame;
+  if (config < 12) frame = [0.01, 0.02, 0.04, 0.06][config & 3];
+  else if (config < 16) frame = (config & 1) ? 0.02 : 0.01;
+  else frame = [0.0025, 0.005, 0.01, 0.02][config & 3];
+  const code = toc & 3;
+  if (code === 0) return frame;
+  if (code === 3) return frame * ((bytes[1] || 0) & 0x3f || 1);
+  return frame * 2;
+}
+
+/** Is this a Steam voice packet (steamid, 0x0B, rate, codec, length, data, crc)? */
+export const isSteamVoice = (b) => b.length >= 18 && b[8] === 0x0b;
+
+/**
+ * Opus frames in a voice packet: the packet itself (CS2 since 2024), or the
+ * frames inside a Steam voice packet: [int16 length][uint16 sequence][frame]…
+ */
+export function opusFrames(b) {
+  if (!b.length) return [];
+  if (!isSteamVoice(b)) return [b];
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  if (b[11] !== 0x06) return []; // 0x00: silence
+  const len = dv.getUint16(12, true);
+  const end = Math.min(b.length - 4, 14 + len);
+  const out = [];
+  for (let p = 14; p + 4 <= end;) {
+    const n = dv.getInt16(p, true);
+    if (n < 0) break; // -1: end of stream
+    const frame = b.subarray(p + 4, p + 4 + n);
+    if (frame.length !== n) break;
+    if (n) out.push(frame);
+    p += 4 + n;
+  }
+  return out;
+}
+
+/** Bring speech to a steady level (in place): gain toward TARGET_RMS, soft peak limit. */
+function level(x) {
+  let sum = 0, n = 0;
+  for (let i = 0; i < x.length; i++) {
+    const v = x[i];
+    if (Math.abs(v) > 0.003) { sum += v * v; n++; }
+  }
+  if (!n) return x;
+  const gain = Math.min(MAX_GAIN, Math.max(0.5, TARGET_RMS / Math.sqrt(sum / n)));
+  for (let i = 0; i < x.length; i++) {
+    const v = x[i] * gain;
+    x[i] = Math.abs(v) < 0.8 ? v : Math.sign(v) * (0.8 + 0.2 * Math.tanh((Math.abs(v) - 0.8) / 0.2));
+  }
+  return x;
 }
 
 /**

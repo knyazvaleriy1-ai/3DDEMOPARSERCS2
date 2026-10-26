@@ -12,8 +12,8 @@ import { clamp } from './util.js';
 import { VOICE_MODES, voiceFilter } from './voice.js';
 import { DEATH_HOLD, deathIn, povBanner, povSpeed, spectateTarget } from './pov.js';
 
-const POV_FOV = 73.74; // CS2: 90° horizontal at 4:3
-const FREE_FOV = 55;
+export const POV_FOV = 73.74; // CS2: 90° horizontal at 4:3
+export const FREE_FOV = 55;
 
 export const CAMERA_MODES = ['free', 'follow', 'pov', 'chase', 'top', 'overview'];
 
@@ -59,6 +59,7 @@ export class Viewer {
       povFF: loadPovFF(), // POV: fast-forward the rest of the round after the player dies (0 = off)
     };
     this.banner = null; // {text, ff} line under the score (POV recordings)
+    this.utilityCam = null; // smokes.js UtilityCam: a lineup replay drives the camera
     this._pov = null; // live POV fast-forward state
     this.voiceHud = null; // voice mode shown by the HUD while recording (else settings.voice)
     this.settings.detail = !this.softwareGL;
@@ -215,6 +216,8 @@ export class Viewer {
 
   setTick(t) {
     if (!this.demo) return;
+    const u = this.utilityCam;
+    if (u && !this.externalDriver && (t < u.start - 1 || t > u.end)) this.stopUtility(); // seeked away
     this.tick = clamp(t, this.demo.startTick, this.demo.endTick);
     this._hasSmooth = false;
     this.audio?.reset();
@@ -246,6 +249,7 @@ export class Viewer {
   setMode(mode, focus = this.focus) {
     if (!CAMERA_MODES.includes(mode)) return;
     if (this._pov) { this._pov = null; this.banner = null; } // the user takes over
+    if (this.utilityCam && !this.externalDriver) this._dropUtility();
     const prev = this.mode;
     this.mode = mode;
     if (focus !== undefined) this.focus = focus;
@@ -289,6 +293,7 @@ export class Viewer {
 
   setFocus(p) {
     if (this._pov) { this._pov = null; this.banner = null; }
+    if (this.utilityCam && !this.externalDriver) this._dropUtility();
     this.focus = p;
     this._hasSmooth = false;
     this._hasPrevTarget = false;
@@ -312,7 +317,7 @@ export class Viewer {
       this.renderer.render(this.scene, this.camera);
       return;
     }
-    const ff = this._povAuto();
+    const ff = this.utilityCam ? this.utilityCam.speedAt(this.tick) : this._povAuto();
     if (this.playing) {
       this.tick += dt * this.demo.tickRate * this.speed * ff;
       if (this._rangeEnd !== null && this.tick >= this._rangeEnd) {
@@ -382,6 +387,43 @@ export class Viewer {
     return ff;
   }
 
+  /**
+   * Replay a smoke lineup with the utility camera (smokes.js): the thrower's
+   * aim, the grenade in flight, the bloom; then back to the previous view.
+   */
+  playUtility(cam) {
+    if (this.utilityCam) this._dropUtility();
+    if (this._pov) this._endPov();
+    this._utilitySaved = { mode: this.mode, focus: this.focus };
+    this.utilityCam = cam;
+    this.focus = cam.player;
+    this.banner = cam.banner;
+    this.controls.enabled = false;
+    this.playRange(cam.start, cam.end, () => this.stopUtility());
+    this._emit('mode');
+  }
+
+  stopUtility() {
+    if (!this.utilityCam) return;
+    const saved = this._utilitySaved;
+    this._dropUtility();
+    // Hand the camera back where the replay left it.
+    const dir = this.camera.getWorldDirection(this._v[0]);
+    this.controls.target.copy(this.camera.position).addScaledVector(dir, 400);
+    this.setMode(saved?.mode === 'pov' || saved?.mode === 'chase' ? saved.mode : 'free', saved?.focus ?? -1);
+  }
+
+  _dropUtility() {
+    this.utilityCam = null;
+    this.banner = null;
+    this._rangeEnd = null;
+    this._onRangeEnd = null;
+    this._hasSmooth = false;
+    this.camera.fov = this.mode === 'pov' ? POV_FOV : FREE_FOV;
+    this.camera.updateProjectionMatrix();
+    this.controls.enabled = this.interactive && (this.mode === 'free' || this.mode === 'follow' || this.mode === 'top');
+  }
+
   _endPov() {
     const pov = this._pov;
     this._pov = null;
@@ -432,7 +474,7 @@ export class Viewer {
 
     const alive = { T: 0, CT: 0 };
     for (const st of this.states) if (st.present && st.alive) alive[st.side]++;
-    const pov = this.mode === 'pov' && this.focus >= 0;
+    const pov = (this.utilityCam ? this.utilityCam.pov : this.mode === 'pov') && this.focus >= 0;
     this.hud.draw({
       keys: this.settings.keys ? this._keysInfo(tick) : null,
       demo: d, tick, round, roundStart, bomb, alive,
@@ -488,7 +530,8 @@ export class Viewer {
   /** First-person weapon, drawn over the scene after clearing depth. */
   _renderViewmodel(dt) {
     const vm = this.viewmodel;
-    if (!vm || this.mode !== 'pov' || this.focus < 0 || !this.settings.viewmodel) return;
+    const pov = this.utilityCam ? this.utilityCam.pov : this.mode === 'pov';
+    if (!vm || !pov || this.focus < 0 || !this.settings.viewmodel) return;
     const st = this.states[this.focus];
     if (!st || !st.alive) return;
     if (st.scoped && /awp|ssg|scar|g3sg1/i.test(st.weapon)) return; // scope overlay instead
@@ -523,6 +566,7 @@ export class Viewer {
     let hidden = -1;
     let cut = this._cutFor(null);
 
+    if (this.utilityCam) return this.utilityCam.update(this, dt);
     // Exponential smoothing that is frame-rate independent (deterministic in renders).
     const k = (rate) => (this._hasSmooth ? 1 - Math.exp(-rate * Math.max(dt, 1 / 240)) : 1);
 

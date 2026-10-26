@@ -1,22 +1,44 @@
-// Sound: every effect is synthesised (no sample files needed), positioned in
-// 3D relative to a listener, and rendered both live and offline for clips.
+// Sound. Gunshots, grenades and the bomb are synthesised from acoustic models
+// rather than tones: the blast wave of the muzzle (a Friedlander pulse), the
+// supersonic crack of rifle bullets, the gas and the gun's mechanism, a few
+// takes of each so bursts don't sound like a machine. Footsteps, hits, helmet
+// clinks, grenade bounces, glass and the bomb being planted are real
+// recordings (Kenney, CC0; web/audio/). Everything plays in one room: a
+// convolution reverb (more of it the farther the sound), positioned around the
+// listener, through a compressor. Players' voice chat (voice.js) sits on top
+// and ducks the game while someone talks.
 //
 // Users can replace any sound with their own file: put e.g. ``ak47.wav`` into
 // ``<data>/sounds/`` (names: see SOUND_NAMES) and it is used instead.
-//
-// Players' voice chat (when the demo has it, see voice.js) is mixed in too,
-// unpositioned like a radio, filtered by team / player.
 import { urls } from './backend.js';
 import { firesBullets, weaponIcon } from './util.js';
 import { VOICE_SAMPLE_RATE, voiceBuffer, voiceFilter } from './voice.js';
 
 export const SOUND_NAMES = [
   'rifle', 'ak47', 'm4', 'silenced', 'sniper', 'auto_sniper', 'pistol', 'deagle', 'smg', 'shotgun', 'lmg',
-  'taser', 'knife', 'throw', 'he', 'flash', 'smoke', 'molotov', 'fire_loop', 'decoy', 'bomb_beep', 'bomb_planted',
-  'bomb_defused', 'c4_explode', 'step', 'headshot', 'hit', 'kill',
+  'taser', 'knife', 'throw', 'bounce', 'he', 'flash', 'smoke', 'molotov', 'glass', 'fire_loop', 'decoy',
+  'bomb_beep', 'bomb_planted', 'bomb_defused', 'c4_explode', 'step', 'hit', 'headshot', 'helmet',
 ];
 
-// -- DSP helpers ----------------------------------------------------------------------
+const VARIANTS = 4; // takes of each synthesised sound
+const C4_TIMER = 40; // s from plant to explosion (mp_c4timer; the event comes ~1 s later)
+const VOICE_GAIN = 1.0;
+const DUCK = 0.5; // game level while someone talks
+
+// -- preferences ----------------------------------------------------------------------------
+
+/** Which kinds of sounds play (remembered): footsteps, hit sounds. */
+export const soundPrefs = { steps: true, hits: true };
+try {
+  Object.assign(soundPrefs, JSON.parse(localStorage.getItem('cs2demo.sfx') || '{}'));
+} catch (_) { /* private mode */ }
+
+export function setSoundPref(key, value) {
+  soundPrefs[key] = !!value;
+  try { localStorage.setItem('cs2demo.sfx', JSON.stringify(soundPrefs)); } catch (_) { /* ignore */ }
+}
+
+// -- DSP helpers ----------------------------------------------------------------------------
 
 function rng(seed) {
   let s = (seed >>> 0) || 1;
@@ -26,8 +48,7 @@ function rng(seed) {
   };
 }
 
-function noise(n, seed) {
-  const r = rng(seed);
+function noise(n, r) {
   const out = new Float32Array(n);
   for (let i = 0; i < n; i++) out[i] = r() * 2 - 1;
   return out;
@@ -52,6 +73,7 @@ function biquad(x, type, f, q, sr) {
   return x;
 }
 
+/** Exponential decay envelope (``attack`` linear ramp, ``delay`` silence first), in place. */
 function envelope(x, sr, attack, decay, delay = 0) {
   for (let i = 0; i < x.length; i++) {
     const t = i / sr - delay;
@@ -63,228 +85,287 @@ function envelope(x, sr, attack, decay, delay = 0) {
 }
 
 function mixInto(dst, src, gain = 1, offset = 0) {
-  for (let i = 0; i < src.length && i + offset < dst.length; i++) dst[i + offset] += src[i] * gain;
+  for (let i = 0; i < src.length && i + offset < dst.length; i++) {
+    if (i + offset >= 0) dst[i + offset] += src[i] * gain;
+  }
   return dst;
 }
 
-function normalize(x, peak = 0.9, drive = 1.4) {
-  let m = 0;
-  for (let i = 0; i < x.length; i++) {
-    x[i] = Math.tanh(x[i] * drive);
-    m = Math.max(m, Math.abs(x[i]));
+/**
+ * Level a sound by its loudness (the loudest 50 ms, in dBFS) rather than its
+ * peak, then catch the peaks with a soft limiter, like a recorded and
+ * mastered game sound. The end fades out without a click.
+ */
+function finish(x, loud = -12, sr = 48000) {
+  const win = Math.max(1, Math.round(0.05 * sr)), hop = Math.max(1, win >> 2);
+  let st = 0;
+  for (let i = 0; i + win <= x.length || i === 0; i += hop) {
+    let e = 0;
+    const end = Math.min(x.length, i + win);
+    for (let j = i; j < end; j++) e += x[j] * x[j];
+    st = Math.max(st, Math.sqrt(e / win));
+    if (end === x.length) break;
   }
-  if (m > 0) for (let i = 0; i < x.length; i++) x[i] *= peak / m;
-  // short fade-out avoids clicks
-  const fade = Math.min(x.length, 256);
+  if (st > 0) {
+    const k = 10 ** (loud / 20) / st, knee = 0.6, room = 0.97 - knee;
+    for (let i = 0; i < x.length; i++) {
+      const v = x[i] * k;
+      const a = Math.abs(v);
+      x[i] = a < knee ? v : Math.sign(v) * (knee + room * Math.tanh((a - knee) / room));
+    }
+  }
+  const fade = Math.min(x.length, 512);
   for (let i = 0; i < fade; i++) x[x.length - 1 - i] *= i / fade;
   return x;
 }
 
-function sweep(n, sr, f0, f1, curve, decay, phase = 0) {
+/**
+ * Friedlander blast wave, the pressure pulse of a muzzle blast or an
+ * explosion: p(t) = (1 - t/T) e^(-b t/T). The positive phase T sets the
+ * weight: ~0.5 ms for a pistol, ~2 ms for a shotgun, ~10 ms for C4.
+ */
+function friedlander(n, sr, T, b, delay = 0) {
   const out = new Float32Array(n);
-  let ph = phase;
-  for (let i = 0; i < n; i++) {
-    const t = i / sr;
-    const f = f1 + (f0 - f1) * Math.exp(-t / curve);
-    ph += (2 * Math.PI * f) / sr;
-    out[i] = Math.sin(ph) * Math.exp(-t / decay);
+  const d = Math.round(delay * sr);
+  for (let i = d; i < n; i++) {
+    const t = (i - d) / sr;
+    out[i] = (1 - t / T) * Math.exp((-b * t) / T);
+  }
+  return biquad(out, 'lp', 11000, 0.7, sr); // finite rise time
+}
+
+/** Supersonic bullet crack: an N-wave, a fraction of a millisecond long. */
+function nWave(n, sr, ms) {
+  const out = new Float32Array(n);
+  const d = Math.max(3, Math.round((ms / 1000) * sr));
+  for (let i = 0; i < d && i < n; i++) out[i] = 1 - (2 * i) / d;
+  return out;
+}
+
+/** Short mechanical clicks (bolt, slide, pump): bandpassed noise ticks. */
+function clicks(n, sr, r, list, freq = 3800) {
+  const out = new Float32Array(n);
+  for (const [at, g] of list) {
+    const tick = biquad(noise(Math.ceil(0.02 * sr), r), 'bp', freq * (0.9 + 0.2 * r()), 2.5, sr);
+    envelope(tick, sr, 0.0002, 0.0035);
+    mixInto(out, tick, g, Math.round(at * sr));
   }
   return out;
 }
 
-// -- synthesis recipes --------------------------------------------------------------------
+// -- guns -----------------------------------------------------------------------------------
 
-function gunshot(sr, p, seed) {
-  const len = Math.ceil(sr * p.len);
-  const out = new Float32Array(len);
-  if (p.crack) mixInto(out, envelope(biquad(noise(len, seed), 'hp', 2500, 0.7, sr), sr, 0, 0.0025), p.crack);
-  mixInto(out, envelope(biquad(noise(len, seed + 1), 'lp', p.body, 0.8, sr), sr, 0.0005, p.bodyDecay), 1);
-  mixInto(out, sweep(len, sr, p.thump[0], p.thump[1], 0.025, p.thumpDecay), p.thumpGain ?? 0.9);
-  const tail = envelope(biquad(noise(len, seed + 2), 'lp', p.tail, 0.7, sr), sr, 0.01, p.tailDecay);
-  mixInto(out, tail, p.tailGain);
-  // A couple of slap-back echoes for an outdoor feel.
-  for (const [delay, g] of [[0.07, 0.25], [0.16, 0.12]]) {
-    const echo = envelope(biquad(noise(len, seed + 3), 'lp', p.tail * 0.8, 0.7, sr), sr, 0.002, p.bodyDecay * 1.5, delay);
-    mixInto(out, echo, g * p.tailGain * 2);
+/**
+ * A dry gunshot (the room adds the tail): the bullet's crack, the muzzle
+ * blast and its reflection off the ground, the gas roaring out, the low-mid
+ * boom that carries most of the sound, the sub thump, the mechanism. Each
+ * take varies a little.
+ */
+function gunshot(sr, p, r) {
+  const n = Math.ceil(sr * p.len);
+  const out = new Float32Array(n);
+  const v = () => 0.9 + 0.2 * r();
+  const lead = p.crack ? 0.0007 : 0; // the crack arrives first
+  if (p.crack) mixInto(out, biquad(nWave(n, sr, 0.25), 'hp', 1500, 0.7, sr), p.crack);
+  const blast = friedlander(n, sr, (p.T / 1000) * v(), p.b ?? 1.5, lead);
+  mixInto(out, blast, p.blast ?? 1);
+  mixInto(out, biquad(blast.slice(), 'lp', 3000, 0.7, sr), 0.5 * (p.blast ?? 1), Math.round((0.0018 + 0.001 * r()) * sr));
+  const gas = biquad(biquad(noise(n, r), 'lp', p.gasLp * v(), 0.7, sr), 'hp', 150, 0.7, sr);
+  mixInto(out, envelope(gas, sr, 0.0004, p.gas[0] * v(), lead), p.gas[1]);
+  const boom = biquad(biquad(biquad(noise(n, r), 'lp', p.boomLp * v(), 0.7, sr), 'lp', p.boomLp, 0.7, sr), 'hp', 60, 0.7, sr);
+  mixInto(out, envelope(boom, sr, 0.0015, p.boom[0] * v(), lead), p.boom[1]);
+  if (p.sub) {
+    const low = biquad(biquad(noise(n, r), 'lp', 110, 0.7, sr), 'lp', 110, 0.7, sr);
+    mixInto(out, envelope(low, sr, 0.004, p.sub[0], lead), p.sub[1]);
   }
-  if (p.click) mixInto(out, envelope(biquad(noise(len, seed + 4), 'bp', 6000, 4, sr), sr, 0, 0.004, 0.012), p.click);
-  return normalize(out, p.peak ?? 0.95, p.drive ?? 1.6);
+  if (p.mech) mixInto(out, clicks(n, sr, r, p.mech.map(([at, g]) => [at * v(), g]), p.mechHz));
+  return finish(out, p.loud ?? -11, sr);
 }
 
+// T: blast positive phase (ms); crack: level of the supersonic crack; gas /
+// boom / sub: [decay s, level] of the gas noise (low-passed at gasLp), the
+// low-mid boom (at boomLp) and the sub thump; mech: [[time s, level]] clicks
+// at mechHz; loud: loudness of the result (dBFS).
 const GUNS = {
-  rifle: { len: 0.6, crack: 0.6, body: 3600, bodyDecay: 0.045, thump: [170, 55], thumpDecay: 0.07, tail: 1200, tailDecay: 0.32, tailGain: 0.35 },
-  ak47: { len: 0.65, crack: 0.7, body: 3200, bodyDecay: 0.05, thump: [150, 50], thumpDecay: 0.08, tail: 1100, tailDecay: 0.35, tailGain: 0.38 },
-  m4: { len: 0.55, crack: 0.6, body: 4300, bodyDecay: 0.035, thump: [190, 60], thumpDecay: 0.06, tail: 1400, tailDecay: 0.3, tailGain: 0.3 },
-  silenced: { len: 0.3, crack: 0, body: 2000, bodyDecay: 0.016, thump: [120, 60], thumpDecay: 0.025, thumpGain: 0.4, tail: 700, tailDecay: 0.08, tailGain: 0.12, click: 0.5, peak: 0.6, drive: 1.1 },
-  sniper: { len: 1.4, crack: 0.9, body: 2600, bodyDecay: 0.08, thump: [110, 38], thumpDecay: 0.16, thumpGain: 1.1, tail: 900, tailDecay: 0.85, tailGain: 0.5 },
-  auto_sniper: { len: 0.9, crack: 0.8, body: 3000, bodyDecay: 0.06, thump: [130, 45], thumpDecay: 0.11, tail: 1000, tailDecay: 0.5, tailGain: 0.42 },
-  pistol: { len: 0.4, crack: 0.5, body: 4600, bodyDecay: 0.025, thump: [230, 90], thumpDecay: 0.04, tail: 1500, tailDecay: 0.2, tailGain: 0.24, peak: 0.85 },
-  deagle: { len: 0.8, crack: 0.8, body: 3000, bodyDecay: 0.05, thump: [140, 48], thumpDecay: 0.1, thumpGain: 1.0, tail: 1000, tailDecay: 0.45, tailGain: 0.4 },
-  smg: { len: 0.35, crack: 0.45, body: 5000, bodyDecay: 0.022, thump: [230, 100], thumpDecay: 0.035, tail: 1600, tailDecay: 0.17, tailGain: 0.2, peak: 0.85 },
-  shotgun: { len: 1.0, crack: 0.5, body: 1800, bodyDecay: 0.09, thump: [100, 40], thumpDecay: 0.12, thumpGain: 1.0, tail: 800, tailDecay: 0.55, tailGain: 0.45 },
-  lmg: { len: 0.6, crack: 0.6, body: 3400, bodyDecay: 0.045, thump: [150, 55], thumpDecay: 0.075, tail: 1100, tailDecay: 0.38, tailGain: 0.36 },
+  pistol: { len: 0.3, T: 0.6, gas: [0.014, 0.6], gasLp: 5500, boom: [0.03, 0.9], boomLp: 1500, mech: [[0.02, 0.15]], loud: -13 },
+  deagle: {
+    len: 0.45, T: 1.1, crack: 0.3, gas: [0.025, 0.6], gasLp: 4500, boom: [0.06, 1.2], boomLp: 1100, sub: [0.07, 3],
+    mech: [[0.022, 0.12]], loud: -10,
+  },
+  smg: { len: 0.25, T: 0.5, gas: [0.012, 0.6], gasLp: 6000, boom: [0.025, 0.8], boomLp: 1600, mech: [[0.012, 0.2], [0.03, 0.1]], loud: -13 },
+  rifle: { len: 0.4, T: 0.85, crack: 0.35, gas: [0.02, 0.6], gasLp: 5000, boom: [0.05, 1.1], boomLp: 1300, sub: [0.05, 2], mech: [[0.016, 0.12]] },
+  ak47: { len: 0.42, T: 1.0, crack: 0.4, gas: [0.024, 0.6], gasLp: 4500, boom: [0.06, 1.2], boomLp: 1150, sub: [0.06, 2.5], mech: [[0.017, 0.14]] },
+  m4: { len: 0.38, T: 0.8, crack: 0.35, gas: [0.018, 0.6], gasLp: 5500, boom: [0.045, 1.0], boomLp: 1400, sub: [0.045, 2], mech: [[0.014, 0.12]] },
+  silenced: {
+    len: 0.22, T: 0.3, blast: 0.35, gas: [0.014, 0.6], gasLp: 1800, boom: [0.022, 0.7], boomLp: 1000,
+    mech: [[0.004, 0.4], [0.024, 0.3]], mechHz: 3000, loud: -17,
+  },
+  sniper: {
+    len: 0.95, T: 1.7, crack: 0.6, b: 1.3, gas: [0.04, 0.6], gasLp: 4000, boom: [0.11, 1.4], boomLp: 900, sub: [0.12, 4],
+    mech: [[0.62, 0.18], [0.78, 0.2]], mechHz: 2600, loud: -8,
+  },
+  auto_sniper: {
+    len: 0.55, T: 1.3, crack: 0.5, gas: [0.03, 0.6], gasLp: 4200, boom: [0.08, 1.3], boomLp: 1000, sub: [0.08, 3],
+    mech: [[0.02, 0.12]], loud: -9,
+  },
+  shotgun: {
+    len: 0.7, T: 1.9, b: 1.3, gas: [0.05, 0.6], gasLp: 3500, boom: [0.1, 1.4], boomLp: 800, sub: [0.1, 3.5],
+    mech: [[0.42, 0.2], [0.52, 0.22]], mechHz: 2200, loud: -9,
+  },
+  lmg: { len: 0.4, T: 0.95, crack: 0.35, gas: [0.022, 0.6], gasLp: 4800, boom: [0.055, 1.2], boomLp: 1200, sub: [0.055, 2.5], mech: [[0.016, 0.14]] },
 };
+
+// -- grenades, bomb, the rest -----------------------------------------------------------------
+
+function explosion(sr, r, { len, T, rumble, debris, crunch = 0.6 }) {
+  const n = Math.ceil(sr * len);
+  const out = friedlander(n, sr, (T / 1000) * (0.9 + 0.2 * r()), 1.2);
+  const low = biquad(biquad(noise(n, r), 'lp', 220, 0.7, sr), 'lp', 220, 0.7, sr);
+  mixInto(out, envelope(low, sr, 0.006, rumble), 7);
+  mixInto(out, envelope(biquad(noise(n, r), 'bp', 900, 0.7, sr), sr, 0.001, 0.09), crunch);
+  // debris: sparse ticks fading out
+  const bits = new Float32Array(n);
+  for (let i = 0; i < n; i++) if (r() < 0.0015 * Math.exp(-i / sr / debris)) bits[i] = r() * 2 - 1;
+  mixInto(out, biquad(bits, 'bp', 2600, 1.2, sr), 0.9, Math.round(0.03 * sr));
+  return finish(out, -7, sr);
+}
+
+function whoosh(sr, r, len, f0, f1, decay) {
+  const n = Math.ceil(sr * len);
+  const out = new Float32Array(n);
+  const src = noise(n, r);
+  // a band-pass sweeping f0 -> f1 (state-variable filter)
+  let low = 0, band = 0;
+  for (let i = 0; i < n; i++) {
+    const t = i / n;
+    const f = 2 * Math.sin((Math.PI * (f0 + (f1 - f0) * t)) / sr);
+    low += f * band;
+    const high = src[i] - low - 0.7 * band;
+    band += f * high;
+    out[i] = band;
+  }
+  return finish(envelope(out, sr, len * 0.35, decay), -17, sr);
+}
 
 const RECIPES = {
-  ...Object.fromEntries(Object.entries(GUNS).map(([k, p]) => [k, (sr) => gunshot(sr, p, k.length * 7919)])),
-  taser(sr) {
-    const len = Math.ceil(sr * 0.35);
-    const out = new Float32Array(len);
-    const r = rng(77);
-    for (let i = 0; i < len; i++) {
-      const t = i / sr;
-      const buzz = Math.sign(Math.sin(2 * Math.PI * 140 * t)) * 0.4 + (r() * 2 - 1) * 0.6;
-      out[i] = buzz * Math.exp(-t / 0.12) * (r() < 0.3 ? 1.6 : 1);
+  ...Object.fromEntries(Object.entries(GUNS).map(([k, p]) => [k, (sr, r) => gunshot(sr, p, r)])),
+  decoy: (sr, r) => gunshot(sr, GUNS.pistol, r),
+  taser(sr, r) {
+    // an electric arc: dense crackle with a fast on/off flutter
+    const n = Math.ceil(sr * 0.3);
+    const out = new Float32Array(n);
+    let gate = 1;
+    for (let i = 0; i < n; i++) {
+      if (i % Math.round(sr / (40 + 30 * r())) === 0) gate = r() < 0.75 ? 1 : 0.2;
+      out[i] = (r() < 0.35 ? r() * 2 - 1 : 0) * gate * Math.exp(-i / sr / 0.12);
     }
-    biquad(out, 'bp', 3000, 0.8, sr);
-    return normalize(out, 0.8, 1.5);
+    biquad(biquad(out, 'hp', 1800, 0.7, sr), 'lp', 7000, 0.7, sr);
+    return finish(out, -15, sr);
   },
-  knife(sr) {
-    const len = Math.ceil(sr * 0.22);
-    const out = noise(len, 31);
-    const parts = 6;
-    const seg = Math.floor(len / parts);
-    for (let k = 0; k < parts; k++) biquad(out.subarray(k * seg, (k + 1) * seg), 'bp', 700 + k * 500, 1.5, sr);
-    return normalize(envelope(out, sr, 0.06, 0.06), 0.5, 1.0);
+  knife: (sr, r) => whoosh(sr, r, 0.16, 900, 3800, 0.05),
+  throw: (sr, r) => whoosh(sr, r, 0.2, 500, 1600, 0.06),
+  he: (sr, r) => explosion(sr, r, { len: 1.8, T: 5, rumble: 0.55, debris: 0.5 }),
+  c4_explode: (sr, r) => explosion(sr, r, { len: 3.4, T: 10, rumble: 1.3, debris: 1.0, crunch: 0.8 }),
+  flash(sr, r) {
+    const n = Math.ceil(sr * 0.5);
+    const out = friedlander(n, sr, 0.0014 * (0.9 + 0.2 * r()), 1.4);
+    mixInto(out, envelope(biquad(noise(n, r), 'hp', 3000, 0.7, sr), sr, 0, 0.008), 0.7);
+    mixInto(out, envelope(biquad(noise(n, r), 'lp', 1800, 0.7, sr), sr, 0.0005, 0.03), 0.5);
+    return finish(out, -11, sr);
   },
-  throw(sr) {
-    const len = Math.ceil(sr * 0.25);
-    const out = noise(len, 41);
-    biquad(out, 'bp', 900, 1.2, sr);
-    return normalize(envelope(out, sr, 0.08, 0.07), 0.35, 1.0);
-  },
-  he(sr) {
-    const len = Math.ceil(sr * 2.4);
-    const out = new Float32Array(len);
-    mixInto(out, envelope(biquad(noise(len, 51), 'lp', 450, 0.7, sr), sr, 0.004, 0.55), 1.2);
-    mixInto(out, sweep(len, sr, 90, 28, 0.08, 0.4), 1.2);
-    mixInto(out, envelope(biquad(noise(len, 52), 'hp', 1800, 0.7, sr), sr, 0, 0.05), 0.6);
-    const crackle = noise(len, 53);
-    const r = rng(54);
-    for (let i = 0; i < len; i++) crackle[i] *= r() < 0.004 ? 6 : 0.02;
-    mixInto(out, envelope(biquad(crackle, 'bp', 2500, 1, sr), sr, 0.05, 0.6), 0.5);
-    return normalize(out, 1.0, 1.8);
-  },
-  flash(sr) {
-    const len = Math.ceil(sr * 1.1);
-    const out = gunshot(sr, { len: 1.1, crack: 1, body: 3400, bodyDecay: 0.03, thump: [160, 50], thumpDecay: 0.06, tail: 1400, tailDecay: 0.25, tailGain: 0.3 }, 61);
-    const ring = new Float32Array(len);
-    for (let i = 0; i < len; i++) ring[i] = Math.sin((2 * Math.PI * 3300 * i) / sr) * Math.exp(-i / sr / 0.35) * 0.12;
-    return normalize(mixInto(out, ring), 0.95, 1.2);
-  },
-  smoke(sr) {
-    const len = Math.ceil(sr * 2.6);
-    const out = new Float32Array(len);
-    mixInto(out, sweep(len, sr, 120, 60, 0.03, 0.06), 0.6);
-    const hiss = biquad(biquad(noise(len, 71), 'hp', 2500, 0.7, sr), 'lp', 9000, 0.7, sr);
-    for (let i = 0; i < len; i++) {
+  smoke(sr, r) {
+    const n = Math.ceil(sr * 2.6);
+    const out = friedlander(n, sr, 0.0015, 1.5);
+    for (let i = 0; i < n; i++) out[i] *= 0.3;
+    const hiss = biquad(biquad(noise(n, r), 'hp', 1500, 0.7, sr), 'lp', 7000, 0.7, sr);
+    const ph = r() * 6;
+    for (let i = 0; i < n; i++) {
       const t = i / sr;
-      hiss[i] *= Math.min(1, t / 0.08) * Math.exp(-t / 1.1) * (0.8 + 0.2 * Math.sin(t * 37));
+      hiss[i] *= Math.min(1, t / 0.12) * Math.exp(-t / 1.4) * (0.82 + 0.18 * Math.sin(t * 11 + ph) * Math.sin(t * 3.1));
     }
-    mixInto(out, hiss, 0.7);
-    return normalize(out, 0.7, 1.1);
+    mixInto(out, hiss, 0.5, Math.round(0.04 * sr));
+    return finish(out, -17, sr);
   },
-  molotov(sr) {
-    const len = Math.ceil(sr * 1.3);
-    const out = new Float32Array(len);
-    const glass = noise(len, 81);
-    biquad(glass, 'hp', 3500, 0.7, sr);
-    const r = rng(82);
-    for (let i = 0; i < len; i++) glass[i] *= Math.exp(-i / sr / 0.08) * (r() < 0.2 ? 1.5 : 0.4);
-    mixInto(out, glass, 0.8);
-    const whoosh = biquad(noise(len, 83), 'lp', 700, 0.7, sr);
-    envelope(whoosh, sr, 0.25, 0.4, 0.05);
-    mixInto(out, whoosh, 1.2);
-    return normalize(out, 0.85, 1.3);
+  molotov(sr, r) {
+    // the fire catching: a soft roar swelling up
+    const n = Math.ceil(sr * 1.2);
+    const out = biquad(biquad(noise(n, r), 'lp', 700, 0.7, sr), 'hp', 80, 0.7, sr);
+    envelope(out, sr, 0.18, 0.45);
+    return finish(out, -13, sr);
   },
-  fire_loop(sr) {
-    const len = Math.ceil(sr * 2.0);
-    const out = biquad(noise(len, 91), 'lp', 400, 0.7, sr);
-    for (let i = 0; i < len; i++) out[i] *= 0.5;
-    const r = rng(92);
-    const crack = new Float32Array(len);
-    for (let i = 0; i < len; i++) if (r() < 0.0025) crack[i] = (r() * 2 - 1) * 4;
-    biquad(crack, 'bp', 2200, 1.2, sr);
-    mixInto(out, crack, 0.6);
-    return normalize(out, 0.5, 1.0);
-  },
-  decoy(sr) {
-    return gunshot(sr, GUNS.pistol, 101);
+  fire_loop(sr, r) {
+    // roar + crackles, made to loop seamlessly (cross-faded seam)
+    const n = Math.ceil(sr * 3);
+    const fade = Math.ceil(sr * 0.25);
+    const raw = biquad(biquad(noise(n + fade, r), 'lp', 420, 0.7, sr), 'hp', 60, 0.7, sr);
+    const ph = r() * 6;
+    for (let i = 0; i < raw.length; i++) raw[i] *= 0.6 + 0.4 * Math.sin(i / sr * 1.7 + ph) * Math.sin(i / sr * 0.6);
+    const crack = new Float32Array(n + fade);
+    for (let i = 0; i < crack.length; i++) if (r() < 0.002) crack[i] = (r() * 2 - 1) * 5;
+    mixInto(raw, biquad(crack, 'bp', 2400, 1.5, sr), 0.5);
+    const out = raw.slice(0, n);
+    for (let i = 0; i < fade; i++) out[i] = out[i] * (i / fade) + raw[n + i] * (1 - i / fade);
+    let m = 0;
+    for (let i = 0; i < n; i++) m = Math.max(m, Math.abs(out[i]));
+    for (let i = 0; i < n; i++) out[i] *= 0.5 / (m || 1);
+    return out;
   },
   bomb_beep(sr) {
-    const len = Math.ceil(sr * 0.14);
-    const out = new Float32Array(len);
-    for (let i = 0; i < len; i++) {
+    // the C4 beep: short, a little nasal
+    const n = Math.ceil(sr * 0.11);
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
       const t = i / sr;
-      out[i] = (Math.sin(2 * Math.PI * 2450 * t) + 0.3 * Math.sin(2 * Math.PI * 4900 * t)) * Math.min(1, t / 0.004) * Math.exp(-t / 0.05);
+      const env = Math.min(1, t / 0.004) * (t < 0.07 ? 1 : Math.exp(-(t - 0.07) / 0.012));
+      out[i] = (Math.sin(2 * Math.PI * 2650 * t) + 0.25 * Math.sin(2 * Math.PI * 5300 * t)) * env;
     }
-    return normalize(out, 0.6, 1.0);
+    return finish(out, -18, sr);
   },
-  bomb_planted(sr) {
-    const len = Math.ceil(sr * 0.9);
-    const out = new Float32Array(len);
-    for (const [start, f] of [[0, 1800], [0.25, 2400], [0.5, 1800]]) {
-      for (let i = 0; i < len; i++) {
-        const t = i / sr - start;
-        if (t < 0 || t > 0.2) continue;
-        out[i] += Math.sin(2 * Math.PI * f * t) * Math.exp(-t / 0.08);
-      }
+  bomb_defused(sr, r) {
+    const n = Math.ceil(sr * 0.4);
+    const out = clicks(n, sr, r, [[0, 0.9], [0.09, 0.7]], 2600);
+    for (let i = Math.round(0.16 * sr); i < n; i++) {
+      const t = i / sr - 0.16;
+      out[i] += Math.sin(2 * Math.PI * 1900 * t) * Math.min(1, t / 0.004) * Math.exp(-t / 0.06) * 0.35;
     }
-    return normalize(out, 0.6, 1.0);
+    return finish(out, -16, sr);
   },
-  bomb_defused(sr) {
-    const len = Math.ceil(sr * 0.8);
-    const out = new Float32Array(len);
-    mixInto(out, envelope(biquad(noise(len, 111), 'bp', 4000, 3, sr), sr, 0, 0.01), 0.8);
-    for (let i = 0; i < len; i++) {
-      const t = i / sr - 0.1;
-      if (t > 0) out[i] += (Math.sin(2 * Math.PI * 1320 * t) + 0.6 * Math.sin(2 * Math.PI * 1980 * t)) * Math.exp(-t / 0.18) * 0.6;
-    }
-    return normalize(out, 0.6, 1.0);
+  // Fallbacks for the recorded sounds (used until / unless the files load).
+  step(sr, r) {
+    const n = Math.ceil(sr * 0.1);
+    const out = envelope(biquad(noise(n, r), 'lp', 600, 0.7, sr), sr, 0.002, 0.02);
+    mixInto(out, envelope(biquad(noise(n, r), 'bp', 2500, 1.2, sr), sr, 0.001, 0.01, 0.008), 0.25);
+    return finish(out, -15, sr);
   },
-  c4_explode(sr) {
-    const len = Math.ceil(sr * 4);
-    const out = new Float32Array(len);
-    mixInto(out, envelope(biquad(noise(len, 121), 'lp', 380, 0.7, sr), sr, 0.006, 1.2), 1.4);
-    mixInto(out, sweep(len, sr, 70, 22, 0.15, 0.9), 1.4);
-    mixInto(out, envelope(biquad(noise(len, 122), 'hp', 1500, 0.7, sr), sr, 0, 0.12), 0.5);
-    return normalize(out, 1.0, 2.0);
-  },
-  step(sr) {
-    const len = Math.ceil(sr * 0.12);
-    const out = new Float32Array(len);
-    mixInto(out, envelope(biquad(noise(len, 131), 'lp', 500, 0.7, sr), sr, 0.002, 0.025), 1);
-    mixInto(out, envelope(biquad(noise(len, 132), 'bp', 2200, 1.5, sr), sr, 0.001, 0.015, 0.01), 0.35);
-    return normalize(out, 0.5, 1.2);
-  },
-  headshot(sr) {
-    const len = Math.ceil(sr * 0.45);
-    const out = new Float32Array(len);
-    for (const [f, g] of [[2350, 1], [3720, 0.7], [5130, 0.45], [6890, 0.3]]) {
-      for (let i = 0; i < len; i++) out[i] += Math.sin((2 * Math.PI * f * i) / sr) * Math.exp(-i / sr / 0.12) * g;
-    }
-    mixInto(out, envelope(biquad(noise(len, 141), 'hp', 4000, 0.7, sr), sr, 0, 0.003), 0.8);
-    return normalize(out, 0.55, 1.0);
-  },
-  hit(sr) {
-    const len = Math.ceil(sr * 0.12);
-    const out = envelope(biquad(noise(len, 151), 'lp', 380, 0.7, sr), sr, 0.001, 0.03);
-    return normalize(out, 0.4, 1.3);
-  },
-  kill(sr) {
-    const len = Math.ceil(sr * 0.5);
-    const out = new Float32Array(len);
-    for (let i = 0; i < len; i++) {
-      const t = i / sr;
-      out[i] = (Math.sin(2 * Math.PI * 1568 * t) * 0.8 + Math.sin(2 * Math.PI * 2349 * t) * 0.5) * Math.min(1, t / 0.003) * Math.exp(-t / 0.15);
-    }
-    return normalize(out, 0.32, 1.0);
-  },
+  hit: (sr, r) => finish(envelope(biquad(noise(Math.ceil(sr * 0.1), r), 'lp', 350, 0.7, sr), sr, 0.001, 0.025), -12, sr),
+  headshot: (sr, r) => finish(envelope(biquad(noise(Math.ceil(sr * 0.12), r), 'lp', 500, 0.7, sr), sr, 0.001, 0.03), -12, sr),
+  helmet: (sr, r) => finish(clicks(Math.ceil(sr * 0.08), sr, r, [[0, 0.5]], 5200), -14, sr),
+  bounce: (sr, r) => finish(clicks(Math.ceil(sr * 0.06), sr, r, [[0, 0.35]], 2200), -16, sr),
+  glass: (sr, r) => finish(envelope(biquad(noise(Math.ceil(sr * 0.3), r), 'hp', 3500, 0.7, sr), sr, 0, 0.06), -15, sr),
+  bomb_planted: (sr, r) => finish(clicks(Math.ceil(sr * 0.2), sr, r, [[0, 0.7], [0.05, 0.5]], 1800), -14, sr),
 };
 
-// -- sound bank ---------------------------------------------------------------------------
+/** Take ``take`` of the synthesised sound ``name`` (Float32Array, mono), or null. */
+export function synthesize(name, sampleRate, take = 0) {
+  const recipe = RECIPES[name];
+  return recipe ? recipe(sampleRate, rng(name.length * 7919 + take * 104729 + 1)) : null;
+}
+
+// Recordings (web/audio/*.wav, CC0): name -> files.
+export const SAMPLES = {
+  step: ['step_0', 'step_1', 'step_2', 'step_3', 'step_4'],
+  hit: ['hit_0', 'hit_1', 'hit_2', 'hit_3'],
+  headshot: ['headshot_0', 'headshot_1', 'headshot_2'],
+  helmet: ['helmet_0', 'helmet_1', 'helmet_2', 'helmet_3'],
+  bounce: ['bounce_0', 'bounce_1', 'bounce_2', 'bounce_3'],
+  glass: ['glass_0', 'glass_1', 'glass_2'],
+  bomb_planted: ['plant_0', 'plant_1', 'plant_2'],
+};
+
+// -- sound bank -------------------------------------------------------------------------------
 
 let overrideFiles = null; // name -> ArrayBuffer (raw file), fetched once
+let sampleFiles = null; // file -> ArrayBuffer
 
 async function fetchOverrides() {
   if (overrideFiles) return overrideFiles;
@@ -300,37 +381,128 @@ async function fetchOverrides() {
   return overrideFiles;
 }
 
-/** Synthesised buffers for one (Offline)AudioContext, with user overrides. */
+async function fetchSamples() {
+  if (sampleFiles) return sampleFiles;
+  sampleFiles = {};
+  const files = [...new Set(Object.values(SAMPLES).flat())];
+  await Promise.all(files.map(async (f) => {
+    try {
+      const res = await fetch(new URL(`../audio/${f}.wav`, import.meta.url));
+      if (res.ok) sampleFiles[f] = await res.arrayBuffer();
+    } catch (_) { /* offline: synthesised fallback */ }
+  }));
+  return sampleFiles;
+}
+
+/**
+ * Sounds for one (Offline)AudioContext: user overrides, then the recordings,
+ * then synthesis. ``get(name, key)`` picks one of the takes by ``key``.
+ */
 export class SoundBank {
   constructor(ctx) {
     this.ctx = ctx;
-    this.buffers = new Map();
+    this.takes = new Map(); // name -> [AudioBuffer]
   }
 
-  async loadOverrides() {
-    const files = await fetchOverrides();
-    for (const [name, data] of Object.entries(files)) {
-      try {
-        this.buffers.set(name, await this.ctx.decodeAudioData(data.slice(0)));
-      } catch (err) {
-        console.warn('bad sound override', name, err);
-      }
+  async load() {
+    const [over, samples] = await Promise.all([fetchOverrides(), fetchSamples()]);
+    const decode = async (data) => {
+      try { return await this.ctx.decodeAudioData(data.slice(0)); } catch (err) { console.warn('bad sound', err); return null; }
+    };
+    for (const [name, files] of Object.entries(SAMPLES)) {
+      if (over[name]) continue;
+      const bufs = (await Promise.all(files.filter((f) => samples[f]).map((f) => decode(samples[f])))).filter(Boolean);
+      if (bufs.length) this.takes.set(name, bufs);
+    }
+    for (const [name, data] of Object.entries(over)) {
+      const buf = await decode(data);
+      if (buf) this.takes.set(name, [buf]);
     }
     return this;
   }
 
-  get(name) {
-    if (!this.buffers.has(name)) {
-      const recipe = RECIPES[name];
-      if (!recipe) return null;
+  get(name, key = 0) {
+    let list = this.takes.get(name);
+    if (!list) {
+      if (!RECIPES[name]) return null;
       const sr = this.ctx.sampleRate;
-      const data = recipe(sr);
-      const buf = this.ctx.createBuffer(1, data.length, sr);
-      buf.copyToChannel(data, 0);
-      this.buffers.set(name, buf);
+      list = [];
+      for (let v = 0; v < VARIANTS; v++) {
+        const data = synthesize(name, sr, v);
+        const buf = this.ctx.createBuffer(1, data.length, sr);
+        buf.copyToChannel(data, 0);
+        list.push(buf);
+      }
+      this.takes.set(name, list);
     }
-    return this.buffers.get(name);
+    return list[Math.abs(key | 0) % list.length];
   }
+
+  /** The room: a stereo impulse response (early reflections, a darkening 1.1 s tail). */
+  impulse() {
+    if (this._ir) return this._ir;
+    const sr = this.ctx.sampleRate;
+    const n = Math.ceil(sr * 1.6);
+    const ir = this.ctx.createBuffer(2, n, sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = ir.getChannelData(ch);
+      const r = rng(4242 + ch * 99);
+      const pre = Math.round(0.01 * sr);
+      let lp = 0;
+      for (let i = pre; i < n; i++) {
+        const t = (i - pre) / sr;
+        const fc = 1500 + 8000 * Math.exp(-t / 0.3); // highs die first
+        lp += (1 - Math.exp((-2 * Math.PI * fc) / sr)) * (r() * 2 - 1 - lp);
+        d[i] = lp * Math.exp((-6.9 * t) / 1.1) * Math.min(1, 0.25 + t / 0.03);
+      }
+      for (const [ms, g] of [[8, 0.6], [13, 0.45], [21, 0.35], [29, 0.28], [41, 0.2], [55, 0.14]]) {
+        const i = pre + Math.round(((ms + (ch ? 1.3 : 0)) * sr) / 1000);
+        if (i < n) d[i] += g * (r() < 0.5 ? 1 : -1) * ((ms + ch) % 2 ? 1 : 0.7);
+      }
+    }
+    this._ir = ir;
+    return ir;
+  }
+}
+
+/** A soft limiter: transparent below -3 dBFS, rounding peaks off up to 0 dB (signal / 2 in, see buildGraph). */
+function softClipCurve() {
+  const n = 4097, curve = new Float32Array(n), knee = 0.7, room = 0.99 - knee;
+  for (let i = 0; i < n; i++) {
+    const v = ((i / (n - 1)) * 2 - 1) * 2;
+    const a = Math.abs(v);
+    curve[i] = a < knee ? v : Math.sign(v) * (knee + room * Math.tanh((a - knee) / room));
+  }
+  return curve;
+}
+
+/**
+ * The mixing graph of a context: game sounds (dry + a send into the room
+ * reverb) and voice chat, summed, through a soft limiter into ``out``
+ * (volume). The sounds are levelled when made, so there's no compressor to
+ * pump the mix.
+ */
+export function buildGraph(ctx, bank) {
+  const out = ctx.createGain();
+  out.connect(ctx.destination);
+  const clip = ctx.createWaveShaper();
+  clip.curve = softClipCurve();
+  clip.oversample = '2x';
+  clip.connect(out);
+  const master = ctx.createGain();
+  master.gain.value = 0.5 * 0.8; // the curve takes signal / 2
+  master.connect(clip);
+  const game = ctx.createGain();
+  game.connect(master);
+  const verb = ctx.createConvolver();
+  verb.buffer = bank.impulse();
+  const verbOut = ctx.createGain();
+  verbOut.gain.value = 0.8;
+  verb.connect(verbOut).connect(game);
+  const voice = ctx.createGain();
+  voice.gain.value = VOICE_GAIN;
+  voice.connect(master);
+  return { out, game, verb, voice };
 }
 
 // -- events -------------------------------------------------------------------------------
@@ -352,9 +524,17 @@ export function shotSound(weapon) {
   return 'rifle';
 }
 
-const VOICE_GAIN = 1.1;
-const LOUD = { sniper: 1.25, deagle: 1.1, shotgun: 1.15, he: 1.5, c4_explode: 2.2, flash: 1.3, smoke: 0.7, molotov: 1.0 };
-const RANGE = { step: 900, hit: 900, headshot: 1600, throw: 700, knife: 700, silenced: 1400, bomb_beep: 2200, fire_loop: 1200 };
+// Level of each kind of sound in the mix (the synthesised ones are made at
+// their loudness already: guns ≈ -11 dB, explosions -7), and the distance
+// (units) a sound fades out over.
+const LOUD = {
+  he: 1.2, c4_explode: 1.5, smoke: 0.6, molotov: 0.6, glass: 0.7, step: 0.4, hit: 0.35, headshot: 0.45, helmet: 0.55,
+  bounce: 0.45, bomb_beep: 1, bomb_planted: 0.6, knife: 0.6, throw: 0.5, taser: 0.8,
+};
+const RANGE = {
+  step: 1100, hit: 700, headshot: 1100, helmet: 1300, throw: 700, knife: 700, bounce: 1000, silenced: 1600,
+  bomb_beep: 2200, fire_loop: 1200, glass: 1500,
+};
 
 function lowerBound(list, tick) {
   let lo = 0, hi = list.length;
@@ -362,7 +542,7 @@ function lowerBound(list, tick) {
   return lo;
 }
 
-/** Footsteps derived from movement: a step every ~75 units while running (CS walking is silent). */
+/** Footsteps derived from movement: a step every ~78 units while running (CS walking is silent). */
 export function synthFootsteps(demo) {
   if (demo._footsteps) return demo._footsteps;
   const out = [];
@@ -389,10 +569,73 @@ export function synthFootsteps(demo) {
 }
 
 /**
- * Sound events with tick in (t0, t1]. Each: {tick, name, pos:[x,y,z] (world) | null, gain, player}.
- * ``listenerPlayer`` (or -1) gets the non-spatial "kill" confirmation for their kills.
+ * Where grenades hit the ground or a wall: [tick, x, y, z] sorted by tick.
+ * In flight a grenade's velocity only changes by gravity; anything else is
+ * an impact.
  */
-export function collectEvents(demo, t0, t1, listenerPlayer = -1, opts = {}) {
+export function grenadeBounces(demo) {
+  if (demo._bounces) return demo._bounces;
+  const out = [];
+  const g = 800 / (demo.tickRate * demo.tickRate); // sv_gravity, units / tick²
+  for (const gr of demo.grenades || []) {
+    const { ticks, pts } = gr;
+    const vel = (i) => {
+      const dt = Math.max(1, ticks[i + 1] - ticks[i]);
+      return [(pts[i * 3 + 3] - pts[i * 3]) / dt, (pts[i * 3 + 4] - pts[i * 3 + 1]) / dt, (pts[i * 3 + 5] - pts[i * 3 + 2]) / dt];
+    };
+    let last = -Infinity;
+    for (let i = 1; i + 1 < ticks.length; i++) {
+      const a = vel(i - 1), b = vel(i);
+      const speed = Math.hypot(...a);
+      if (speed < 1.5) continue; // resting or rolling slowly
+      const dt = (ticks[i + 1] - ticks[i - 1]) / 2;
+      const off = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2] + g * dt);
+      if (off > Math.max(1.2, 0.3 * speed) && ticks[i] - last > demo.tickRate * 0.15) {
+        out.push([ticks[i], pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]]);
+        last = ticks[i];
+      }
+    }
+  }
+  out.sort((x, y) => x[0] - y[0]);
+  demo._bounces = out;
+  return out;
+}
+
+/**
+ * Each planted bomb: {plant, end, how, pos}. It ticks until it is defused or
+ * explodes (``how``), or until the round is over without either: in CS2 the
+ * round ends at once when every CT is dead, and the bomb is gone with it.
+ */
+export function bombTimers(demo) {
+  if (demo._bombTimers) return demo._bombTimers;
+  const out = [];
+  const starts = (demo.rounds || []).map((r) => r.start);
+  const bomb = demo.bomb || [];
+  bomb.forEach((b, i) => {
+    if (b.type !== 'plant') return;
+    let end = Math.min(b.tick + (C4_TIMER + 3) * demo.tickRate, demo.endTick ?? Infinity);
+    const next = starts.find((s) => s > b.tick);
+    if (next !== undefined) end = Math.min(end, next);
+    let how = null;
+    for (let j = i + 1; j < bomb.length && bomb[j].tick <= end; j++) {
+      if (bomb[j].type === 'plant') { end = bomb[j].tick; break; }
+      if (bomb[j].type === 'defuse' || bomb[j].type === 'explode') {
+        end = bomb[j].tick;
+        how = bomb[j].type;
+        break;
+      }
+    }
+    out.push({ plant: b.tick, end, how, pos: b.pos });
+  });
+  demo._bombTimers = out;
+  return out;
+}
+
+/**
+ * Sound events with tick in (t0, t1]. Each: {tick, name, pos:[x,y,z] (world) | null, gain, player, key}.
+ * ``opts.footsteps === false`` leaves footsteps out (fast playback).
+ */
+export function collectEvents(demo, t0, t1, _listenerPlayer = -1, opts = {}) {
   const out = [];
   const st = demo._scratchState || (demo._scratchState = demo.state(0, demo.startTick));
   const posOf = (p, tick) => {
@@ -404,60 +647,62 @@ export function collectEvents(demo, t0, t1, listenerPlayer = -1, opts = {}) {
     if (tick > t1) break;
     if (tick <= t0) continue;
     const name = shotSound(weapon);
-    if (name) out.push({ tick, name, pos: posOf(p, tick), gain: 1, player: p });
+    if (name) out.push({ tick, name, pos: posOf(p, tick), gain: 1, player: p, key: i });
   }
-  for (let i = lowerBound(demo.hurts, t0 + 1e-6); i < demo.hurts.length; i++) {
-    const h = demo.hurts[i];
-    if (h[0] > t1) break;
-    if (h[0] <= t0) continue;
-    out.push({ tick: h[0], name: h[5] === 'head' ? 'headshot' : 'hit', pos: posOf(h[2], h[0]), gain: 0.8, player: h[2] });
-  }
-  if (listenerPlayer >= 0) {
-    for (const k of demo.kills) {
-      if (k.tick > t1) break;
-      if (k.tick > t0 && k.attacker === listenerPlayer && k.victim !== k.attacker) out.push({ tick: k.tick, name: 'kill', pos: null, gain: 1 });
+  if (soundPrefs.hits) {
+    for (let i = lowerBound(demo.hurts, t0 + 1e-6); i < demo.hurts.length; i++) {
+      const h = demo.hurts[i];
+      if (h[0] > t1) break;
+      if (h[0] <= t0) continue;
+      const pos = posOf(h[2], h[0] - 1);
+      let name = 'hit';
+      if (h[5] === 'head') name = st.helmet ? 'helmet' : 'headshot';
+      out.push({ tick: h[0], name, pos, gain: 1, player: h[2], key: i });
     }
   }
   const fx = demo.effects || {};
   const point = (list, name, key = 'tick') => {
-    for (const e of list || []) {
+    (list || []).forEach((e, i) => {
       const t = e[key];
-      if (t > t0 && t <= t1) out.push({ tick: t, name, pos: e.pos, gain: 1 });
-    }
+      if (t > t0 && t <= t1) out.push({ tick: t, name, pos: e.pos, gain: 1, key: i });
+    });
   };
   point(fx.hes, 'he');
   point(fx.flashes, 'flash');
   point(fx.smokes, 'smoke', 'start');
   point(fx.infernos, 'molotov', 'start');
-  for (const g of demo.grenades || []) {
+  point(fx.infernos, 'glass', 'start');
+  (demo.grenades || []).forEach((g, i) => {
     const t = g.ticks[0];
-    if (t > t0 && t <= t1) out.push({ tick: t, name: 'throw', pos: [g.pts[0], g.pts[1], g.pts[2]], gain: 1 });
+    if (t > t0 && t <= t1) out.push({ tick: t, name: 'throw', pos: [g.pts[0], g.pts[1], g.pts[2]], gain: 1, key: i });
+  });
+  const bounces = grenadeBounces(demo);
+  for (let i = lowerBound(bounces, t0 + 1e-6); i < bounces.length && bounces[i][0] <= t1; i++) {
+    const [tick, x, y, z] = bounces[i];
+    out.push({ tick, name: 'bounce', pos: [x, y, z], gain: 1, key: i });
   }
-  // Bomb: plant, beeps speeding up over 40 s, defuse, explosion.
-  let plant = null;
-  for (const b of demo.bomb) {
-    if (b.type === 'plant') plant = b;
-    if (b.tick > t0 && b.tick <= t1) {
-      if (b.type === 'plant') out.push({ tick: b.tick, name: 'bomb_planted', pos: b.pos, gain: 1 });
-      if (b.type === 'defuse') out.push({ tick: b.tick, name: 'bomb_defused', pos: b.pos || plant?.pos, gain: 1 });
-      if (b.type === 'explode') out.push({ tick: b.tick, name: 'c4_explode', pos: plant?.pos || b.pos, gain: 1 });
+  // Bomb: plant, beeps speeding up while it ticks, defuse, explosion.
+  for (const c4 of bombTimers(demo)) {
+    if (c4.plant > t1) break;
+    if (c4.end <= t0) continue;
+    const { pos } = c4;
+    if (c4.plant > t0) out.push({ tick: c4.plant, name: 'bomb_planted', pos, gain: 1 });
+    if (c4.how && c4.end > t0 && c4.end <= t1) {
+      out.push({ tick: c4.end, name: c4.how === 'defuse' ? 'bomb_defused' : 'c4_explode', pos, gain: 1 });
     }
-    if (b.type === 'plant') {
-      const end = demo.bomb.find((e) => e.tick > b.tick && (e.type === 'defuse' || e.type === 'explode'))?.tick ?? b.tick + 40 * demo.tickRate;
-      let t = b.tick + demo.tickRate;
-      while (t < end && t <= t1) {
-        if (t > t0) out.push({ tick: t, name: 'bomb_beep', pos: b.pos, gain: 0.9 });
-        const elapsed = (t - b.tick) / demo.tickRate;
-        t += demo.tickRate * Math.max(0.12, 1 - elapsed / 42);
-      }
+    let t = c4.plant + demo.tickRate;
+    while (t < c4.end && t <= t1) {
+      if (t > t0) out.push({ tick: t, name: 'bomb_beep', pos, gain: 1 });
+      const elapsed = (t - c4.plant) / demo.tickRate;
+      t += demo.tickRate * Math.max(0.12, 1 - elapsed / 42);
     }
   }
-  if (opts.footsteps !== false) {
+  if (opts.footsteps !== false && soundPrefs.steps) {
     const steps = synthFootsteps(demo);
     for (let i = lowerBound(steps, t0 + 1e-6); i < steps.length; i++) {
       const [tick, p] = steps[i];
       if (tick > t1) break;
-      if (tick > t0) out.push({ tick, name: 'step', pos: posOf(p, tick).map((v, j) => (j === 2 ? v - 48 : v)), gain: 0.7, player: p });
+      if (tick > t0) out.push({ tick, name: 'step', pos: posOf(p, tick).map((v, j) => (j === 2 ? v - 48 : v)), gain: 1, player: p, key: i });
     }
   }
   out.sort((a, b) => a.tick - b.tick);
@@ -472,25 +717,32 @@ export function activeFires(demo, tick) {
 // -- spatialisation -----------------------------------------------------------------------
 
 /**
- * Gain / pan / lowpass for a source at world ``pos`` heard by ``listener``
- * ({x, y, z, yaw} in world units, yaw in degrees).
+ * Gain / pan / low-pass / reverb send for a source at world ``pos`` heard by
+ * ``listener`` ({x, y, z, yaw} in world units, yaw in degrees). Far sounds
+ * lose their highs and are mostly room.
  */
 export function spatial(listener, pos, name) {
-  if (!pos || !listener) return { gain: 1, pan: 0, cutoff: 20000 };
+  if (!pos || !listener) return { gain: 1, pan: 0, cutoff: 20000, wet: 0.12 };
   const dx = pos[0] - listener.x, dy = pos[1] - listener.y, dz = pos[2] - listener.z;
   const d = Math.hypot(dx, dy, dz);
-  const range = RANGE[name] || 3200;
+  const range = RANGE[name] || 3600;
   if (d > range * 1.5) return null;
-  const gain = (1 / (1 + (d / (range * 0.16)) ** 1.5)) * Math.max(0, 1 - d / (range * 1.5));
+  // ~6 dB per doubling of distance past ``near``, faded out from 0.6 to 1.5 x range
+  const near = range * 0.2;
+  const fade = Math.min(1, (range * 1.5 - d) / (range * 0.9));
+  const gain = (near / (near + d)) * fade;
   const yaw = (listener.yaw * Math.PI) / 180;
   // listener right vector in world XY: (sin yaw, -cos yaw)
   const h = Math.hypot(dx, dy) || 1;
-  const pan = Math.max(-1, Math.min(1, ((dx * Math.sin(yaw) - dy * Math.cos(yaw)) / h) * 0.8));
-  const cutoff = 20000 - 16500 * Math.min(1, Math.max(0, (d - 300) / 2500));
-  return { gain, pan, cutoff };
+  const pan = Math.max(-1, Math.min(1, ((dx * Math.sin(yaw) - dy * Math.cos(yaw)) / h) * 0.75));
+  const cutoff = 18000 - 15000 * Math.min(1, Math.max(0, (d - 250) / 2600));
+  // The room's share falls off slower than the direct sound.
+  const wet = 0.1 + 0.32 * Math.min(1, d / 2200) * fade + 0.08 * (1 - gain);
+  return { gain, pan, cutoff, wet };
 }
 
-function play(ctx, dest, buffer, when, sp, gain, rate = 1) {
+/** Play ``buffer`` at ``when`` through filter + pan into the graph's dry bus and the room send. */
+export function play(ctx, graph, buffer, when, sp, gain, rate = 1) {
   const src = ctx.createBufferSource();
   src.buffer = buffer;
   src.playbackRate.value = rate;
@@ -501,10 +753,16 @@ function play(ctx, dest, buffer, when, sp, gain, rate = 1) {
   pan.pan.value = sp.pan;
   const g = ctx.createGain();
   g.gain.value = gain * sp.gain;
-  src.connect(lp).connect(pan).connect(g).connect(dest);
+  src.connect(lp).connect(pan).connect(g).connect(graph.game);
+  const send = ctx.createGain();
+  send.gain.value = gain * Math.max(sp.gain, 0.05) * sp.wet * 5.5;
+  lp.connect(send).connect(graph.verb);
   src.start(Math.max(when, 0));
-  return { src, gain: g };
+  return { src, gain: g, send };
 }
+
+/** A slight, repeatable pitch variation per event. */
+const jitter = (key) => 1 + (((key * 2654435761) >>> 0) / 4294967296 - 0.5) * 0.06;
 
 // -- live playback ------------------------------------------------------------------------
 
@@ -521,6 +779,7 @@ export class LiveAudio {
     this.fires = new Map();
     this.voiceSources = new Map(); // spurt -> playing source
     this.voiceKey = '';
+    this.duckUntil = 0;
     this.lastTick = null;
     const unlock = () => this.ensure();
     window.addEventListener('pointerdown', unlock, { once: true, capture: true });
@@ -535,20 +794,16 @@ export class LiveAudio {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return null;
     this.ctx = new AC({ latencyHint: 'interactive' });
-    this.master = this.ctx.createGain();
-    this.master.connect(this.ctx.destination);
-    this.voiceGain = this.ctx.createGain();
-    this.voiceGain.gain.value = VOICE_GAIN;
-    this.voiceGain.connect(this.master);
-    this._applyVolume();
     this.bank = new SoundBank(this.ctx);
-    this.bank.loadOverrides();
+    this.bank.load();
+    this.graph = buildGraph(this.ctx, this.bank);
+    this._applyVolume();
     return this.ctx;
   }
 
   setVolume(v) { this.volume = v; this._applyVolume(); this._save(); }
   setMuted(m) { this.muted = m; this._applyVolume(); this._save(); }
-  _applyVolume() { if (this.master) this.master.gain.value = this.muted ? 0 : this.volume; }
+  _applyVolume() { if (this.graph) this.graph.out.gain.value = this.muted ? 0 : this.volume; }
   _save() { try { localStorage.setItem('cs2demo.audio', JSON.stringify({ volume: this.volume, muted: this.muted })); } catch (_) { /* ignore */ } }
 
   /**
@@ -569,11 +824,11 @@ export class LiveAudio {
     let n = 0;
     for (const e of events) {
       if (n > 24) break;
-      const buf = this.bank.get(e.name);
+      const buf = this.bank.get(e.name, e.key ?? 0);
       const sp = spatial(listener, e.pos, e.name);
       if (!buf || !sp) continue;
       const offset = ((e.tick - prev) / demo.tickRate) / speed;
-      play(ctx, this.master, buf, ctx.currentTime + 0.02 + offset, sp, (LOUD[e.name] || 1) * e.gain * 0.8, rate);
+      play(ctx, this.graph, buf, ctx.currentTime + 0.02 + offset, sp, (LOUD[e.name] || 1) * e.gain, rate * jitter(e.key ?? 0));
       n++;
     }
     // Burning molotovs: looping crackle while active.
@@ -581,15 +836,14 @@ export class LiveAudio {
     const keep = new Set();
     for (const f of active) {
       keep.add(f.key);
-      const sp = spatial(listener, f.pos, 'fire_loop') || { gain: 0, pan: 0, cutoff: 2000 };
+      const sp = spatial(listener, f.pos, 'fire_loop') || { gain: 0, pan: 0, cutoff: 2000, wet: 0.2 };
       let node = this.fires.get(f.key);
       if (!node) {
-        const buf = this.bank.get('fire_loop');
-        node = play(ctx, this.master, buf, ctx.currentTime, sp, 0.6, rate);
+        node = play(ctx, this.graph, this.bank.get('fire_loop'), ctx.currentTime, sp, 0.5, rate);
         node.src.loop = true;
         this.fires.set(f.key, node);
       }
-      node.gain.gain.value = 0.6 * sp.gain;
+      node.gain.gain.value = 0.5 * sp.gain;
     }
     for (const [key, node] of this.fires) {
       if (!keep.has(key)) { node.src.stop(); this.fires.delete(key); }
@@ -599,6 +853,15 @@ export class LiveAudio {
   stopFires() {
     for (const node of this.fires.values()) node.src.stop();
     this.fires.clear();
+  }
+
+  /** Lower the game from ``start`` to ``end`` (context time) so speech stays clear. */
+  _duck(start, end) {
+    const g = this.graph.game.gain;
+    this.duckUntil = Math.max(this.duckUntil, end);
+    g.cancelScheduledValues(start);
+    g.setTargetAtTime(DUCK, start, 0.05);
+    g.setTargetAtTime(1, this.duckUntil, 0.2);
   }
 
   /** Start the talk spurts that begin now (or, after a jump, are under way). */
@@ -614,7 +877,7 @@ export class LiveAudio {
       return;
     }
     if (!track.isReady) {
-      track.ready();
+      track.ready().catch(() => {});
       return;
     }
     const rate = steady ? 1 : speed;
@@ -630,13 +893,16 @@ export class LiveAudio {
       if (this.voiceSources.has(s) || !this._voiceAllow(s.player, s.tick)) continue;
       const pcm = track.pcm(s);
       const offset = steady && !jumped ? 0 : Math.max(0, (tick - s.tick) / demo.tickRate); // seconds already spoken
-      if (offset >= pcm.length / VOICE_SAMPLE_RATE - 0.02) continue;
+      const dur = pcm.length / VOICE_SAMPLE_RATE - offset;
+      if (dur < 0.02) continue;
       const src = ctx.createBufferSource();
       src.buffer = voiceBuffer(ctx, pcm);
       src.playbackRate.value = rate;
-      src.connect(this.voiceGain);
+      src.connect(this.graph.voice);
       src.onended = () => { if (this.voiceSources.get(s) === src) this.voiceSources.delete(s); };
-      src.start(ctx.currentTime + 0.02, offset);
+      const at = ctx.currentTime + 0.02;
+      src.start(at, offset);
+      this._duck(at, at + dur / rate);
       this.voiceSources.set(s, src);
     }
   }
@@ -647,6 +913,12 @@ export class LiveAudio {
     }
     this.voiceSources.clear();
     this.voiceKey = '';
+    if (this.graph && this.duckUntil) {
+      const g = this.graph.game.gain;
+      g.cancelScheduledValues(this.ctx.currentTime);
+      g.setTargetAtTime(1, this.ctx.currentTime, 0.1);
+      this.duckUntil = 0;
+    }
   }
 
   reset() {
@@ -663,14 +935,14 @@ export class LiveAudio {
  * (slow motion stretches time, fast-forward squeezes it: game sounds are left
  * out where the clip runs faster than 1.5x), the listener is ``player``'s head.
  * ``voice``: whose voice chat to mix in (voice.js modes, around ``player``).
+ * ``listenerAt(tick)`` -> {x, y, z, yaw} hears from elsewhere (a moving camera).
  */
-export async function renderClipAudio(demo, ticks, fps, player, { sampleRate = 48000, voice = 'off' } = {}) {
+export async function renderClipAudio(demo, ticks, fps, player, { sampleRate = 48000, voice = 'off', listenerAt = null } = {}) {
   const duration = ticks.length / fps;
   const ctx = new OfflineAudioContext(2, Math.ceil(duration * sampleRate), sampleRate);
-  const bank = await new SoundBank(ctx).loadOverrides();
-  const master = ctx.createGain();
-  master.gain.value = 0.85;
-  master.connect(ctx.destination);
+  const bank = await new SoundBank(ctx).load();
+  const graph = buildGraph(ctx, bank);
+  graph.out.gain.value = 0.9;
   const t0 = ticks[0], t1 = ticks[ticks.length - 1];
   const timeOf = (tick) => {
     let lo = 0, hi = ticks.length - 1;
@@ -684,29 +956,33 @@ export async function renderClipAudio(demo, ticks, fps, player, { sampleRate = 4
     return ((ticks[i + 1] - ticks[i]) * fps) / demo.tickRate;
   };
   const st = demo.state(player, t0);
-  const listenerAt = (tick) => {
+  listenerAt ||= (tick) => {
     demo.state(player, tick, st);
     return { x: st.x, y: st.y, z: st.z + 64, yaw: st.yaw };
   };
   for (const e of collectEvents(demo, t0 - 1e-6, t1, player)) {
-    const buf = bank.get(e.name);
+    const buf = bank.get(e.name, e.key ?? 0);
     const speed = localSpeed(e.tick);
     if (!buf || speed > 1.5) continue;
     const sp = spatial(listenerAt(e.tick), e.pos, e.name);
     if (!sp) continue;
-    const rate = Math.max(0.55, Math.min(1, speed));
-    play(ctx, master, buf, timeOf(e.tick), sp, (LOUD[e.name] || 1) * e.gain * 0.8, rate);
+    const rate = Math.max(0.55, Math.min(1, speed)) * jitter(e.key ?? 0);
+    play(ctx, graph, buf, timeOf(e.tick), sp, (LOUD[e.name] || 1) * e.gain, rate);
   }
   for (const f of demo.effects?.infernos || []) {
     if (f.end <= t0 || f.start >= t1) continue;
     const start = timeOf(Math.max(f.start, t0)), end = timeOf(Math.min(f.end, t1));
     const sp = spatial(listenerAt(Math.max(f.start, t0)), f.pos, 'fire_loop');
     if (!sp || end - start < 0.3 * ((Math.min(f.end, t1) - Math.max(f.start, t0)) / demo.tickRate)) continue;
-    const node = play(ctx, master, bank.get('fire_loop'), start, sp, 0.6);
+    const node = play(ctx, graph, bank.get('fire_loop'), start, sp, 0.5);
     node.src.loop = true;
     node.src.stop(end);
   }
-  await mixVoice(ctx, demo, ticks, timeOf, voice, player);
+  try {
+    await mixVoice(ctx, graph, demo, ticks, timeOf, voice, player);
+  } catch (err) {
+    console.warn('voice chat left out of the clip', err); // the game sound still records
+  }
   return ctx.startRendering();
 }
 
@@ -714,18 +990,17 @@ export async function renderClipAudio(demo, ticks, fps, player, { sampleRate = 4
  * Voice chat for a clip. Speech always plays at normal speed from the moment
  * it starts in the clip (slow motion and fast-forward don't pitch it); a
  * player's next spurt waits for the previous one, or is dropped when it would
- * come more than 2 s late.
+ * come more than 2 s late. The game ducks under it.
  */
-async function mixVoice(ctx, demo, ticks, timeOf, mode, focus) {
+async function mixVoice(ctx, graph, demo, ticks, timeOf, mode, focus) {
   const allow = voiceFilter(demo, mode, focus);
   const track = demo.voice;
   if (!allow || !track.available || !(await track.ready())) return;
   const t0 = ticks[0], t1 = ticks[ticks.length - 1];
-  const out = ctx.createGain();
-  out.gain.value = VOICE_GAIN;
-  out.connect(ctx.destination);
   const busy = new Map(); // player -> time their audio ends
+  const spans = [];
   const rate = demo.tickRate;
+  const total = ctx.length / ctx.sampleRate;
   for (const s of track.overlapping(t0, t1)) {
     if (!allow(s.player, s.tick)) continue;
     const pcm = track.pcm(s);
@@ -738,13 +1013,28 @@ async function mixVoice(ctx, demo, ticks, timeOf, mode, focus) {
       if (free - at > 2) continue;
       at = free;
     }
-    if (at >= ctx.length / ctx.sampleRate) continue;
+    if (at >= total) continue;
     const src = ctx.createBufferSource();
     src.buffer = voiceBuffer(ctx, pcm);
-    src.connect(out);
+    src.connect(graph.voice);
     src.start(at, offset);
     busy.set(s.player, at + dur);
+    spans.push([at, Math.min(total, at + dur)]);
   }
+  // Duck the game under the speech (overlapping spans merged).
+  spans.sort((a, b) => a[0] - b[0]);
+  const g = graph.game.gain;
+  let cur = null;
+  const flush = () => {
+    if (!cur) return;
+    g.setTargetAtTime(DUCK, Math.max(0, cur[0] - 0.03), 0.05);
+    g.setTargetAtTime(1, cur[1], 0.2);
+  };
+  for (const span of spans) {
+    if (cur && span[0] <= cur[1] + 0.3) cur[1] = Math.max(cur[1], span[1]);
+    else { flush(); cur = [...span]; }
+  }
+  flush();
 }
 
 /** 16-bit PCM WAV from an AudioBuffer. */

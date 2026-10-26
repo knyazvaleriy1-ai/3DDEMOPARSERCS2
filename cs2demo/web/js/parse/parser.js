@@ -364,6 +364,7 @@ export function parseLoaded(wasm, { fileName = 'demo.dem', step = 2, progress = 
     const p = lookup.get(row.user_steamid, row.user_name);
     if (p >= 0) shots.push([row.tick, p, str(row.weapon).replaceAll('weapon_', '')]);
   }
+  markKnifeRounds(rounds, kills, shots);
 
   const hurts = [];
   for (const row of rows(events, 'player_hurt')) {
@@ -579,6 +580,36 @@ function buildRounds(events, t0, t1) {
   return rounds;
 }
 
+// Weapons that say nothing about the kind of round (falls, the bomb).
+const NEUTRAL_WEAPONS = ['', 'world', 'c4', 'planted_c4'];
+const isKnife = (w) => /knife|bayonet/.test(w.toLowerCase());
+
+/**
+ * Flag knife rounds (sides picked by a knife fight: not part of the match, no
+ * stats or highlights) with ``knife: true`` and number the other rounds from 1
+ * (knife rounds get 0). A knife round comes before the match: knives used,
+ * nothing else fired or killed with.
+ */
+export function markKnifeRounds(rounds, kills, shots) {
+  for (const [i, r] of rounds.entries()) {
+    let knife = 0, other = 0;
+    for (const [tick, , weapon] of shots) {
+      if (tick < r.start || tick > r.end) continue;
+      if (isKnife(weapon)) knife++;
+      else if (!NEUTRAL_WEAPONS.includes(weapon)) other++;
+    }
+    for (const k of kills) {
+      if (k.round !== i) continue;
+      if (isKnife(k.weapon)) knife++;
+      else if (!NEUTRAL_WEAPONS.includes(k.weapon)) other++;
+    }
+    if (!knife || other) break;
+    r.knife = true;
+  }
+  let num = 0;
+  for (const r of rounds) r.num = r.knife ? 0 : ++num;
+}
+
 function buildEffects(events, lookup, tickRate, nextRoundStart) {
   const thrower = (row) => lookup.get(row.user_steamid, row.user_name);
   const xyz = (row) => ['x', 'y', 'z'].map((k) => pyRound(num(row[k]), 1));
@@ -664,7 +695,7 @@ function buildGrenades(gr, lookup, step) {
 }
 
 /** Voice packets of known players: (tick, player, length) rows + their bytes. */
-function buildVoice(wasm, lookup) {
+export function buildVoice(wasm, lookup) {
   let v;
   try {
     v = wasm.voice();
@@ -676,7 +707,13 @@ function buildVoice(wasm, lookup) {
   let off = 0;
   for (let i = 0; i < v.ticks.length; i++) {
     const len = v.lengths[i];
-    const p = lookup.get(v.steamids[i], undefined);
+    let p = lookup.get(v.steamids[i], undefined);
+    if (p < 0 && len >= 18 && v.data[off + 8] === 0x0b) {
+      // Steam's voice format (before 2024) starts with the speaker's steamid.
+      let id = 0n;
+      for (let k = 7; k >= 0; k--) id = (id << 8n) | BigInt(v.data[off + k]);
+      p = lookup.get(String(id), undefined);
+    }
     if (p >= 0) rowsOut.push([v.ticks[i], p, len, off]);
     off += len;
   }
