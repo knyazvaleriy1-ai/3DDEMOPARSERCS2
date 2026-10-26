@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import shutil
 import tempfile
 import threading
@@ -141,6 +142,11 @@ def _summary(demo_id: str, meta: dict[str, Any] | None = None) -> dict[str, Any]
 
 
 def create_app() -> FastAPI:
+    # Module scripts and WebAssembly need these exact types; Python's table
+    # comes from the Windows registry, where .js is often text/plain and .mjs
+    # missing, and browsers then refuse to run the file.
+    for ext, mime in ((".js", "text/javascript"), (".mjs", "text/javascript"), (".wasm", "application/wasm")):
+        mimetypes.add_type(mime, ext)
     app = FastAPI(title="CS2 3D Demo Viewer", version=__version__)
     app.add_middleware(GZipMiddleware, minimum_size=2048)
     jobs = JobRegistry()

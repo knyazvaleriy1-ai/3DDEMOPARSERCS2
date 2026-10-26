@@ -149,18 +149,29 @@ export class DemoData {
     return score;
   }
 
-  /** K/D/A counted from events up to ``tick``; damage from the last snapshot. */
+  /** Is round ``i`` part of the match (not warmup / outside rounds, not a knife round)? */
+  isMatchRound(i) {
+    return i >= 0 && i < this.rounds.length && !this.rounds[i].knife;
+  }
+
+  /**
+   * K/D/A counted from events up to ``tick`` (only in match rounds: not the
+   * warmup or a knife round); damage from the last snapshot.
+   */
   statsAt(tick) {
     const out = this.players.map(() => ({ k: 0, d: 0, a: 0, adr: 0 }));
     for (const k of this.kills) {
       if (k.tick > tick) break;
+      if (!this.isMatchRound(k.round)) continue;
       if (k.attacker >= 0 && k.attacker !== k.victim) out[k.attacker].k += k.teamkill ? -1 : 1;
       out[k.victim].d += 1;
       if (k.assister >= 0) out[k.assister].a += 1;
     }
     let snap = null, roundsPlayed = 0;
     for (const s of this.scoreboard) {
-      if (s.tick <= tick) { snap = s; roundsPlayed++; } else break;
+      if (s.tick > tick) break;
+      snap = s;
+      if (s.round !== 0) roundsPlayed++; // 0: a knife round
     }
     if (snap) {
       for (let p = 0; p < this.P; p++) {

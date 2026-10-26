@@ -191,6 +191,8 @@ def detect_clutches(meta: dict[str, Any]) -> list[dict[str, Any]]:
 
     out = []
     for r_idx, r in enumerate(rounds):
+        if r.get("knife"):
+            continue
         start_alive = r.get("alive") or {}
         alive = {"T": set(start_alive.get("T", [])), "CT": set(start_alive.get("CT", []))}
         if not alive["T"] or not alive["CT"]:
@@ -249,6 +251,8 @@ def detect_highlights(meta: dict[str, Any], **options: float) -> list[dict[str, 
     for i, k in enumerate(kills):
         a = k.get("attacker", -1)
         if a < 0 or a == k["victim"] or k.get("teamkill") or k.get("round", -1) < 0:
+            continue
+        if k["round"] < len(rounds) and rounds[k["round"]].get("knife"):
             continue
         groups[(k["round"], a)].append(i)
 

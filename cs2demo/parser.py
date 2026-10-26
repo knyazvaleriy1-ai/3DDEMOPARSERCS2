@@ -465,6 +465,7 @@ def parse_demo(
         p = lookup.get(row.get("user_steamid"), row.get("user_name"))
         if p >= 0:
             shots.append([int(row["tick"]), p, _str(row.get("weapon")).replace("weapon_", "")])
+    mark_knife_rounds(rounds, kills, shots)
 
     hurts = []
     for row in _rows(events, "player_hurt"):
@@ -733,6 +734,46 @@ def _attach_alive(rounds, u8, frame_of, player_count) -> None:
         r["alive"] = alive
 
 
+# Weapons that say nothing about the kind of round (falls, the bomb).
+NEUTRAL_WEAPONS = ("", "world", "c4", "planted_c4")
+
+
+def _is_knife(weapon: str) -> bool:
+    w = weapon.lower()
+    return "knife" in w or "bayonet" in w
+
+
+def mark_knife_rounds(rounds: list[dict[str, Any]], kills: list[dict[str, Any]], shots: list[list[Any]]) -> None:
+    """Flag knife rounds (sides picked by a knife fight: not part of the match,
+    no stats or highlights) with ``knife: True`` and number the other rounds
+    from 1 (knife rounds get 0). A knife round comes before the match: knives
+    were used and nothing else was fired or killed with."""
+    for i, r in enumerate(rounds):
+        knife = other = 0
+        for tick, _p, weapon in shots:
+            if r["start"] <= tick <= r["end"]:
+                if _is_knife(weapon):
+                    knife += 1
+                elif weapon not in NEUTRAL_WEAPONS:
+                    other += 1
+        for k in kills:
+            if k["round"] == i:
+                if _is_knife(k["weapon"]):
+                    knife += 1
+                elif k["weapon"] not in NEUTRAL_WEAPONS:
+                    other += 1
+        if not knife or other:
+            break
+        r["knife"] = True
+    num = 0
+    for r in rounds:
+        if r.get("knife"):
+            r["num"] = 0
+        else:
+            num += 1
+            r["num"] = num
+
+
 def _build_effects(events, lookup: _Players, tick_rate: float, next_round_start) -> dict[str, list]:
     def thrower(row) -> int:
         return lookup.get(row.get("user_steamid"), row.get("user_name"))
@@ -816,10 +857,13 @@ def _build_voice(parser, lookup: _Players) -> tuple[np.ndarray, np.ndarray]:
         packets = []
     rows, blobs = [], []
     for packet in packets:
+        data = bytes(packet["bytes"])
         p = lookup.get(packet["steamid"])
+        if p < 0 and len(data) >= 18 and data[8] == 0x0B:
+            # Steam's voice format (before 2024) starts with the speaker's steamid.
+            p = lookup.get(int.from_bytes(data[:8], "little"))
         if p < 0:
             continue
-        data = bytes(packet["bytes"])
         rows.append((int(packet["tick"]), p, len(data)))
         blobs.append(data)
     order = sorted(range(len(rows)), key=lambda i: rows[i][0])

@@ -54,7 +54,7 @@ export class Timeline {
         c.fillStyle = '#8b93a1';
         c.font = `${10 * dpr}px system-ui, sans-serif`;
         c.textBaseline = 'top';
-        c.fillText(String(r.num), x0 + 3 * dpr, 3 * dpr);
+        c.fillText(r.knife ? 'нож' : String(r.num), x0 + 3 * dpr, 3 * dpr);
       }
     });
 

@@ -117,7 +117,7 @@ export class Hud {
       clock = fmtTime(ROUND_SECONDS - (tick - round.freezeEnd) / rate);
     }
     this._text(clock, W / 2, y + 18 * s, 18 * s, color, 'center', 700);
-    this._text(`Раунд ${round.num}`, W / 2, y + 36 * s, 11 * s, '#8b93a1', 'center', 500);
+    this._text(round.knife ? 'Ножевой раунд' : `Раунд ${round.num}`, W / 2, y + 36 * s, 11 * s, '#8b93a1', 'center', 500);
   }
 
   /** Draw icon ``key`` with its left edge at x, vertically centred on y. Returns width. */
