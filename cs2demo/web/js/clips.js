@@ -1,10 +1,9 @@
 // Clip recording. A ClipDirector turns a highlight into a deterministic list of
 // frames (camera mode, timing, optional slow motion). Frames are then encoded:
-//  * in the browser with WebCodecs + mp4-muxer (frame-exact H.264 MP4, faster
-//    than real time on most GPUs),
+//  * in the browser with WebCodecs + Mediabunny (frame-exact H.264 + AAC MP4,
+//    faster than real time on most GPUs),
 //  * or, where WebCodecs is missing, in real time with MediaRecorder (WebM),
 //  * or by the headless renderer (Python + Chromium), via window.cs2render.
-import { Muxer, ArrayBufferTarget } from '../vendor/mp4-muxer.mjs';
 import { encodeWav, renderClipAudio } from './audio.js';
 
 export const POV_TO_MODE = { first: 'pov', third: 'chase', overview: 'overview' };
@@ -108,124 +107,94 @@ export class ClipDirector {
 }
 
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
-const yieldTask = () => new Promise((r) => setTimeout(r, 0));
 
-// H.264 first (plays everywhere); VP9-in-MP4 as a fallback for browsers
-// without an H.264 encoder (the server re-encodes those to H.264).
-const CODECS = [
-  ['avc1.640034', 'avc'], ['avc1.640033', 'avc'], ['avc1.640028', 'avc'], ['avc1.4d0028', 'avc'],
-  ['avc1.42001f', 'avc'], ['vp09.00.40.08', 'vp9'], ['vp09.00.10.08', 'vp9'],
-];
-
-async function pickEncoderConfig(width, height, fps) {
-  if (typeof VideoEncoder === 'undefined') return null;
-  const bitrate = Math.round(Math.min(40e6, Math.max(2e6, width * height * fps * 0.14)));
-  for (const [codec, mux] of CODECS) {
-    const config = { codec, width, height, bitrate, framerate: fps };
-    if (mux === 'avc') config.avc = { format: 'avc' };
-    try {
-      const { supported } = await VideoEncoder.isConfigSupported(config);
-      if (supported) return { config, mux };
-    } catch (_) { /* try next */ }
+// MP4 writing (Mediabunny), loaded on first use. Audio is always AAC: it plays
+// everywhere (Opus in MP4 is silent in iOS players and many galleries). Where
+// the browser can't encode AAC itself (Chrome on Linux / Android, Safari
+// without AudioEncoder), a WebAssembly build of FFmpeg's AAC encoder does it.
+let mediabunny = null;
+function loadMediabunny() {
+  if (!mediabunny) {
+    mediabunny = (async () => {
+      const mb = await import('../vendor/mediabunny/mediabunny.min.mjs');
+      if (!(await mb.canEncodeAudio('aac', { numberOfChannels: 2, sampleRate: 48000, bitrate: AUDIO_BITRATE }))) {
+        const { registerAacEncoder } = await import('../vendor/mediabunny/mediabunny-aac-encoder.min.mjs');
+        registerAacEncoder();
+      }
+      return mb;
+    })();
+    mediabunny.catch(() => { mediabunny = null; });
   }
-  return null;
+  return mediabunny;
+}
+
+const AUDIO_BITRATE = 160000;
+const videoBitrate = (width, height, fps) => Math.round(Math.min(40e6, Math.max(2e6, width * height * fps * 0.14)));
+
+// H.264 first (plays everywhere); VP9-in-MP4 for browsers without an H.264
+// encoder (the server re-encodes those to H.264).
+async function pickVideoCodec(mb, width, height, fps) {
+  if (typeof VideoEncoder === 'undefined') return null;
+  return mb.getFirstEncodableVideoCodec(['avc', 'vp9'], { width, height, bitrate: videoBitrate(width, height, fps) });
 }
 
 export async function webCodecsSupported(width = 1280, height = 720, fps = 30) {
-  return !!(await pickEncoderConfig(width, height, fps));
-}
-
-// AAC where the browser can encode it (Windows / macOS Chrome), Opus otherwise
-// (the server converts Opus to AAC when saving the clip).
-async function pickAudioConfig(sampleRate, channels) {
-  if (typeof AudioEncoder === 'undefined') return null;
-  for (const [codec, mux] of [['mp4a.40.2', 'aac'], ['opus', 'opus']]) {
-    const config = { codec, sampleRate, numberOfChannels: channels, bitrate: 160000 };
-    try {
-      const { supported } = await AudioEncoder.isConfigSupported(config);
-      if (supported) return { config, mux };
-    } catch (_) { /* try next */ }
+  try {
+    return !!(await pickVideoCodec(await loadMediabunny(), width, height, fps));
+  } catch (err) {
+    console.warn('webcodecs check', err);
+    return false;
   }
-  return null;
 }
 
-async function encodeAudio(buffer, muxer, picked) {
-  let failure = null;
-  const enc = new AudioEncoder({
-    output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
-    error: (e) => { failure = e; },
-  });
-  enc.configure(picked.config);
-  const ch = buffer.numberOfChannels, sr = buffer.sampleRate, block = 4800;
-  const chans = Array.from({ length: ch }, (_, c) => buffer.getChannelData(c));
-  for (let start = 0; start < buffer.length; start += block) {
-    const n = Math.min(block, buffer.length - start);
-    const planar = new Float32Array(n * ch);
-    for (let c = 0; c < ch; c++) planar.set(chans[c].subarray(start, start + n), c * n);
-    const data = new AudioData({
-      format: 'f32-planar', sampleRate: sr, numberOfFrames: n, numberOfChannels: ch,
-      timestamp: Math.round((start / sr) * 1e6), data: planar,
-    });
-    enc.encode(data);
-    data.close();
-    if (failure) throw failure;
-  }
-  await enc.flush();
-  enc.close();
-  if (failure) throw failure;
-}
-
-/** Frame-exact export to MP4 with WebCodecs. Returns a Blob. */
+/** Frame-exact export to MP4 (H.264 + AAC) with WebCodecs. Returns a Blob. */
 export async function exportMp4(director, { onProgress, signal } = {}) {
+  const mb = await loadMediabunny();
   const { width, height, fps } = director.opts;
-  const picked = await pickEncoderConfig(width, height, fps);
-  if (!picked) throw new Error('WebCodecs недоступен');
-  const { config, mux } = picked;
-  director.codec = mux;
+  const codec = await pickVideoCodec(mb, width, height, fps);
+  if (!codec) throw new Error('WebCodecs недоступен');
+  director.codec = codec;
   onProgress?.(0);
   const sound = await director.audio();
-  const audioPick = sound ? await pickAudioConfig(sound.sampleRate, sound.numberOfChannels) : null;
-  director.audioCodec = audioPick ? audioPick.mux : null;
-  const muxer = new Muxer({
-    target: new ArrayBufferTarget(),
-    video: { codec: mux, width, height, frameRate: fps },
-    audio: audioPick ? { codec: audioPick.mux, sampleRate: sound.sampleRate, numberOfChannels: sound.numberOfChannels } : undefined,
-    fastStart: 'in-memory',
-    firstTimestampBehavior: 'offset',
+  let audioCodec = null;
+  if (sound) {
+    const opts = { numberOfChannels: sound.numberOfChannels, sampleRate: sound.sampleRate, bitrate: AUDIO_BITRATE };
+    for (const c of ['aac', 'opus']) {
+      if (await mb.canEncodeAudio(c, opts)) { audioCodec = c; break; }
+    }
+    if (!audioCodec) console.warn('no audio encoder: the clip will be silent');
+  }
+  director.audioCodec = audioCodec;
+  const output = new mb.Output({ format: new mb.Mp4OutputFormat({ fastStart: 'in-memory' }), target: new mb.BufferTarget() });
+  const video = new mb.CanvasSource(director.canvas, {
+    codec, bitrate: videoBitrate(width, height, fps), keyFrameInterval: 2,
   });
-  if (audioPick) await encodeAudio(sound, muxer, audioPick);
-  let failure = null;
-  const encoder = new VideoEncoder({
-    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-    error: (e) => { failure = e; },
-  });
-  encoder.configure(config);
-  const frameUs = 1e6 / fps;
+  output.addVideoTrack(video, { frameRate: fps });
+  const audio = audioCodec ? new mb.AudioBufferSource({ codec: audioCodec, bitrate: AUDIO_BITRATE }) : null;
+  if (audio) output.addAudioTrack(audio);
+  await output.start();
   try {
+    if (audio) await audio.add(sound);
     director.start();
     const n = director.count;
     for (let i = 0; i < n; i++) {
       if (signal?.aborted) throw new DOMException('Отменено', 'AbortError');
-      if (failure) throw failure;
-      const canvas = director.render(i);
-      const frame = new VideoFrame(canvas, { timestamp: Math.round(i * frameUs), duration: Math.round(frameUs) });
-      encoder.encode(frame, { keyFrame: i % (fps * 2) === 0 });
-      frame.close();
-      while (encoder.encodeQueueSize > 6) await yieldTask();
+      director.render(i);
+      await video.add(i / fps, 1 / fps);
       if (i % 4 === 0) {
         onProgress?.(i / n);
         await nextFrame();
       }
     }
-    await encoder.flush();
-    if (failure) throw failure;
-    muxer.finalize();
+    await output.finalize();
+  } catch (err) {
+    await output.cancel().catch(() => {});
+    throw err;
   } finally {
     director.finish();
-    if (encoder.state !== 'closed') encoder.close();
   }
   onProgress?.(1);
-  return new Blob([muxer.target.buffer], { type: 'video/mp4' });
+  return new Blob([output.target.buffer], { type: 'video/mp4' });
 }
 
 function recorderMime() {
@@ -244,6 +213,9 @@ export async function exportRealtime(director, { onProgress, signal } = {}) {
   let audioCtx = null, audioSrc = null;
   if (sound) {
     audioCtx = new AudioContext({ sampleRate: sound.sampleRate });
+    // Created after awaits, i.e. outside the click: mobile browsers start it
+    // suspended, which records silence.
+    await audioCtx.resume().catch(() => {});
     const dest = audioCtx.createMediaStreamDestination();
     audioSrc = audioCtx.createBufferSource();
     audioSrc.buffer = sound;

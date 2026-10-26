@@ -342,8 +342,8 @@ python -m pytest
 ## Лицензии
 
 Код проекта — MIT. Сторонние материалы перечислены в
-[THIRD_PARTY.md](THIRD_PARTY.md): three.js и mp4-muxer (MIT), иконки game-icons.net
-(CC BY 3.0), demoparser2 в WebAssembly (MIT), UnRAR в WebAssembly (node-unrar-js — MIT,
+[THIRD_PARTY.md](THIRD_PARTY.md): three.js (MIT), Mediabunny (MPL-2.0) с AAC-кодером
+из FFmpeg (LGPL-2.1+), иконки game-icons.net (CC BY 3.0), demoparser2 в WebAssembly (MIT), UnRAR в WebAssembly (node-unrar-js — MIT,
 UnRAR — лицензия UnRAR, freeware). Геометрия карт и радары
 (собственность Valve) и модель игрока не входят в репозиторий — они скачиваются
 на ваш компьютер при первом запуске, а для веб-версии — при сборке сайта.
