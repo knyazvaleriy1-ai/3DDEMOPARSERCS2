@@ -103,7 +103,12 @@ fn run(pass: Pass) -> Result<DemoOutput, JsError> {
             if bytes.is_empty() {
                 return Err(JsError::new("demo not loaded"));
             }
-            Parser::new(settings, ParsingMode::ForceSingleThreaded).parse_demo(&bytes).map_err(err)
+            // Normal = what the Python package uses: the demo is split at full
+            // snapshots and each part parsed from a clean entity state (one
+            // after another here: rayon runs on the current thread in wasm).
+            // Single-threaded parsing keeps stale button masks across entity
+            // re-creation, so its keys differ from the Python parser's.
+            Parser::new(settings, ParsingMode::Normal).parse_demo(&bytes).map_err(err)
         })
     })
 }

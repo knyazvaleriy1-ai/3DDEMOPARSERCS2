@@ -13,13 +13,28 @@ export const FORMAT_VERSION = 1;
 export const GENERATOR = 'cs2demo-web 0.1';
 
 const FLAG_PRESENT = 1, FLAG_ALIVE = 2, FLAG_CT = 4, FLAG_SCOPED = 8, FLAG_DEFUSING = 16,
-  FLAG_HELMET = 32, FLAG_DEFUSER = 64;
+  FLAG_HELMET = 32, FLAG_DEFUSER = 64, FLAG_AIRBORNE = 128;
+
+// On-screen keyboard: bit i of the "keys" section is KEY_NAMES[i], i.e. bit
+// KEY_BUTTONS[i][1] of the game's button mask (m_nButtonDownMaskPrev).
+export const KEY_BUTTONS = [['W', 3], ['A', 9], ['S', 4], ['D', 10], ['SPACE', 1], ['CTRL', 2], ['SHIFT', 16],
+  ['LMB', 0], ['RMB', 11], ['R', 13], ['E', 5], ['TAB', 33], ['F', 35]];
+const KEY_SPACE = 4;
+// A jump with the jump button never held was bound to the mouse wheel (a
+// scroll presses and releases +jump within one tick).
+const KEY_WHEEL = 13;
+export const KEY_NAMES = [...KEY_BUTTONS.map(([k]) => k), 'WHEEL'];
+// demoparser2's single-button props -> bit of the mask (its raw "buttons"
+// column is missing in some demos). meta.frames.keysKnown lists the keys
+// there is data for.
+const BUTTON_PROPS = { FORWARD: 3, LEFT: 9, BACK: 4, RIGHT: 10, JUMP: 1, DUCK: 2, WALK: 16, FIRE: 0, RIGHTCLICK: 11,
+  RELOAD: 13, USE: 5, SCOREBOARD: 33, INSPECT: 35 };
 
 const U8_FIELDS = ['health', 'armor', 'flags', 'weapon', 'duck', 'place'];
 
 export const TICK_PROPS = ['X', 'Y', 'Z', 'yaw', 'pitch', 'health', 'armor_value', 'team_num', 'is_alive',
   'active_weapon_name', 'balance', 'has_helmet', 'has_defuser', 'is_scoped', 'is_defusing', 'duck_amount',
-  'last_place_name', 'game_time'];
+  'last_place_name', 'game_time', 'is_airborne'];
 
 const SCOREBOARD_PROPS = ['kills_total', 'deaths_total', 'assists_total', 'damage_total', 'team_rounds_total',
   'mvps', 'score', 'team_clan_name'];
@@ -147,7 +162,7 @@ export function parseLoaded(wasm, { fileName = 'demo.dem', step = 2, progress = 
   progress(0.2, 'Позиции игроков');
   const wantedTicks = [];
   for (let t = 0; t < lastEventTick + 64 * 300; t += step) wantedTicks.push(t);
-  const tk = wasm.ticks(TICK_PROPS, Int32Array.from(wantedTicks));
+  const tk = wasm.ticks([...TICK_PROPS, ...Object.keys(BUTTON_PROPS)], Int32Array.from(wantedTicks));
   const n = tk.rows;
   const c = tk.columns;
   if (!n) throw new DemoParseError('В демо нет данных об игроках');
@@ -245,6 +260,8 @@ export function parseLoaded(wasm, { fileName = 'demo.dem', step = 2, progress = 
   const ang = new Int16Array(frameCount * P * 2);
   const u8 = new Uint8Array(frameCount * P * U8_FIELDS.length);
   const money = new Uint16Array(frameCount * P);
+  const keys = new Uint16Array(frameCount * P);
+  const { keysAt, known: keysKnown } = buttonKeys(c);
   const clip = (v, lo, hi) => (Number.isNaN(v) ? lo : Math.min(hi, Math.max(lo, v)));
   for (let i = 0; i < n; i++) {
     if (!keep[i]) continue;
@@ -266,6 +283,7 @@ export function parseLoaded(wasm, { fileName = 'demo.dem', step = 2, progress = 
     if (colBool(c.is_defusing, i)) flags |= FLAG_DEFUSING;
     if (colBool(c.has_helmet, i)) flags |= FLAG_HELMET;
     if (colBool(c.has_defuser, i)) flags |= FLAG_DEFUSER;
+    if (colBool(c.is_airborne, i)) flags |= FLAG_AIRBORNE;
     const b = fp * 6;
     u8[b] = Math.trunc(clip(colNum(c.health, i), 0, 255));
     u8[b + 1] = Math.trunc(clip(colNum(c.armor_value, i), 0, 255));
@@ -275,6 +293,13 @@ export function parseLoaded(wasm, { fileName = 'demo.dem', step = 2, progress = 
     u8[b + 4] = Math.trunc(clip(Math.fround(nz(colNum(c.duck_amount, i)) * 255), 0, 255));
     u8[b + 5] = placeIdx.get(colStr(c.last_place_name, i)) ?? 0;
     money[fp] = Math.trunc(clip(colNum(c.balance, i), 0, 65535));
+    keys[fp] = keysAt(i);
+  }
+  if (keysKnown.includes('SPACE') && c.is_airborne) {
+    const fl = new Uint8Array(frameCount * P), z = new Float32Array(frameCount * P);
+    for (let i = 0; i < frameCount * P; i++) { fl[i] = u8[i * 6 + 2]; z[i] = pos[i * 3 + 2]; }
+    markWheelJumps(keys, fl, z, frameCount, P, step);
+    keysKnown.push('WHEEL');
   }
 
   const frameOf = (t) => Math.min(Math.max(floorDiv(t - t0, step), 0), frameCount - 1);
@@ -418,7 +443,7 @@ export function parseLoaded(wasm, { fileName = 'demo.dem', step = 2, progress = 
   const sections = [];
   const parts = [];
   let offset = 0;
-  for (const [name, arr, dtype] of [['pos', pos, 'float32'], ['ang', ang, 'int16'], ['u8', u8, 'uint8'], ['money', money, 'uint16']]) {
+  for (const [name, arr, dtype] of [['pos', pos, 'float32'], ['ang', ang, 'int16'], ['u8', u8, 'uint8'], ['money', money, 'uint16'], ['keys', keys, 'uint16']]) {
     sections.push({ name, dtype, offset, bytes: arr.byteLength });
     parts.push([offset, arr]);
     offset += arr.byteLength;
@@ -426,13 +451,71 @@ export function parseLoaded(wasm, { fileName = 'demo.dem', step = 2, progress = 
   }
   const frames = new Uint8Array(offset);
   for (const [o, arr] of parts) frames.set(new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength), o);
-  meta.frames = { startTick: t0, endTick: t1, step, count: frameCount, players: P, u8Fields: U8_FIELDS, sections };
+  meta.frames = {
+    startTick: t0, endTick: t1, step, count: frameCount, players: P, u8Fields: U8_FIELDS,
+    keys: KEY_NAMES, keysKnown, sections,
+  };
 
   progress(0.92, 'Поиск хайлайтов');
   meta.highlights = detectHighlights(meta);
   meta.parseSeconds = pyRound((now() - started) / 1000, 2);
   progress(1.0, 'Готово');
   return { meta, frames: frames.buffer };
+}
+
+/** Game button mask (BigInt) -> bits of the "keys" section. */
+export function keysFromButtons(mask) {
+  let k = 0;
+  KEY_BUTTONS.forEach(([, bit], i) => { if ((mask >> BigInt(bit)) & 1n) k |= 1 << i; });
+  return k;
+}
+
+/**
+ * Per-row key bits from the single-button columns, and the on-screen keyboard
+ * keys those columns cover.
+ */
+function buttonKeys(c) {
+  // key bit for each available button column
+  const cols = [];
+  for (const [name, bit] of Object.entries(BUTTON_PROPS)) {
+    const key = KEY_BUTTONS.findIndex(([, b]) => b === bit);
+    if (c[name] && key >= 0) cols.push([c[name], 1 << key]);
+  }
+  return {
+    keysAt: (i) => {
+      let k = 0;
+      for (const [col, b] of cols) if (colBool(col, i)) k |= b;
+      return k;
+    },
+    known: KEY_BUTTONS.filter(([, bit]) => Object.entries(BUTTON_PROPS).some(([n, b]) => b === bit && c[n]))
+      .map(([key]) => key),
+  };
+}
+
+/**
+ * Set KEY_WHEEL around jumps made without the jump button (flat [F][P] arrays).
+ * A jump: on the ground, then airborne and at least 8 units higher 6 ticks
+ * later. If Space wasn't held from 12 ticks before to 4 ticks after the
+ * take-off, the jump came from the mouse wheel; mark it for 8 ticks.
+ */
+export function markWheelJumps(keys, flags, z, frames, P, step) {
+  const rise = Math.max(1, floorDiv(6, step)), back = Math.max(1, floorDiv(12, step));
+  const ahead = Math.max(1, floorDiv(4, step)), mark = Math.max(1, floorDiv(8, step));
+  if (frames <= rise + 1) return;
+  const air = (f, p) => (flags[f * P + p] & FLAG_AIRBORNE) !== 0;
+  const alive = (f, p) => (flags[f * P + p] & FLAG_ALIVE) !== 0;
+  for (let t = 1; t < frames - rise; t++) {
+    for (let p = 0; p < P; p++) {
+      if (air(t - 1, p) || !air(t, p) || !alive(t - 1, p) || !alive(t, p)) continue;
+      if (!(z[(t + rise) * P + p] - z[(t - 1) * P + p] > 8.0)) continue;
+      let space = false;
+      for (let g = Math.max(0, t - back); g <= Math.min(frames - 1, t + ahead); g++) {
+        if (keys[g * P + p] & (1 << KEY_SPACE)) { space = true; break; }
+      }
+      if (space) continue;
+      for (let g = Math.max(0, t - 1); g < Math.min(frames, t - 1 + mark); g++) keys[g * P + p] |= 1 << KEY_WHEEL;
+    }
+  }
 }
 
 function buildRounds(events, t0, t1) {

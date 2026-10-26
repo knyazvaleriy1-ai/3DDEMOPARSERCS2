@@ -110,7 +110,8 @@ def _render_opts(args: argparse.Namespace) -> dict:
     except ValueError as exc:
         raise SystemExit("--res в формате 1280x720") from exc
     return {"width": width, "height": height, "fps": args.fps, "pov": args.pov,
-            "slowmo": args.slowmo, "hud": not args.no_hud, "sound": not args.no_sound, "detail": args.quality}
+            "slowmo": args.slowmo, "hud": not args.no_hud, "sound": not args.no_sound, "keys": args.keys,
+            "detail": args.quality}
 
 
 def cmd_render(args: argparse.Namespace) -> None:
@@ -218,6 +219,7 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--slowmo", action="store_true", help="замедление в момент киллов")
     p.add_argument("--no-hud", action="store_true", help="без HUD и килфида")
     p.add_argument("--no-sound", action="store_true", help="без звука")
+    p.add_argument("--keys", action="store_true", help="экранная клавиатура: какие клавиши жмёт игрок")
     p.add_argument("--quality", choices=["auto", "low", "high"], default="auto",
                    help="материалы карты: auto — полные на GPU, упрощённые на CPU")
 

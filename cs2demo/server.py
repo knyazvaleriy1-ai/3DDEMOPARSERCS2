@@ -82,6 +82,7 @@ class RenderRequest(BaseModel):
     slowmo: bool = False
     hud: bool = True
     sound: bool = True
+    keys: bool = False
     quality: str = "auto"
 
 
@@ -403,6 +404,7 @@ def create_app() -> FastAPI:
             slowmo=req.slowmo,
             hud=req.hud,
             sound=req.sound,
+            keys=req.keys,
             detail=req.quality if req.quality in ("auto", "low", "high") else "auto",
         )
         return {"job": key, "clips": [h["id"] for h in chosen]}

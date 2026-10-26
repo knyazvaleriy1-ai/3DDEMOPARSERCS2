@@ -65,7 +65,10 @@ def select(
     return chosen[:top] if len(chosen) > top else chosen
 
 
-_REUSE_KEYS = {"width": 1280, "height": 720, "fps": 30, "pov": "first", "slowmo": False, "hud": True, "detail": "auto"}
+_REUSE_KEYS = {
+    "width": 1280, "height": 720, "fps": 30, "pov": "first", "slowmo": False, "hud": True, "detail": "auto",
+    "keys": False,
+}  # fmt: skip
 
 
 def _reusable(demo_id: str, h: dict[str, Any], badge: str, label: str, opts: dict[str, Any]) -> Path | None:
@@ -78,7 +81,8 @@ def _reusable(demo_id: str, h: dict[str, Any], badge: str, label: str, opts: dic
         return None
     want = {k: opts.get(k, v) for k, v in _REUSE_KEYS.items()}
     want.update(badge=badge, match=label)
-    if any(side.get(k) != v for k, v in want.items()):
+    # Sidecars written before a setting existed have its default.
+    if any(side.get(k, _REUSE_KEYS.get(k)) != v for k, v in want.items()):
         return None
     if side.get("sound") != bool(opts.get("sound", True)):
         return None

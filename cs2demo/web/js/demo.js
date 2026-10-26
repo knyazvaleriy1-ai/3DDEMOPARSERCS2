@@ -2,7 +2,7 @@
 import { STATIC, library } from './backend.js';
 import { lerp, lerpAngle } from './util.js';
 
-export const FLAG = { PRESENT: 1, ALIVE: 2, CT: 4, SCOPED: 8, DEFUSING: 16, HELMET: 32, DEFUSER: 64 };
+export const FLAG = { PRESENT: 1, ALIVE: 2, CT: 4, SCOPED: 8, DEFUSING: 16, HELMET: 32, DEFUSER: 64, AIRBORNE: 128 };
 const TELEPORT = 260; // units per sample: anything faster is a respawn/teleport
 
 export class PlayerState {
@@ -31,6 +31,10 @@ export class DemoData {
     this.ang = new Int16Array(buffer, sec.ang.offset, sec.ang.bytes / 2);
     this.u8 = new Uint8Array(buffer, sec.u8.offset, sec.u8.bytes);
     this.money = new Uint16Array(buffer, sec.money.offset, sec.money.bytes / 2);
+    // Keys held (on-screen keyboard); absent in demos parsed before it existed.
+    this.keys = sec.keys ? new Uint16Array(buffer, sec.keys.offset, sec.keys.bytes / 2) : null;
+    this.keyNames = f.keys || [];
+    this.keysKnown = new Set(f.keysKnown || []);
     this.players = meta.players;
     this.rounds = meta.rounds;
     this.kills = meta.kills;
@@ -173,6 +177,15 @@ export class DemoData {
       }
     }
     return state;
+  }
+
+  /** Keys held by ``p`` at ``tick``: {W: true, …} keyed by meta.frames.keys, or null without data. */
+  keysAt(p, tick, out = {}) {
+    if (!this.keys) return null;
+    const f = Math.min(this.count - 1, Math.max(0, Math.floor((tick - this.startTick) / this.step)));
+    const bits = this.keys[f * this.P + p];
+    this.keyNames.forEach((name, i) => { out[name] = (bits & (1 << i)) !== 0; });
+    return out;
   }
 
   /** Tick of the latest shot by ``p`` at or before ``tick`` (within 1 s), or null. */
