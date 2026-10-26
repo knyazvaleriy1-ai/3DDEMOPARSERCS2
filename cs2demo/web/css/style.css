@@ -143,6 +143,9 @@ input[type=checkbox] { accent-color: var(--accent); }
 .ctrl-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
 .time { font-variant-numeric: tabular-nums; color: var(--muted); margin: 0 6px; min-width: 110px; }
 .speed { color: var(--muted); display: flex; gap: 6px; align-items: center; }
+.voice { display: flex; gap: 4px; align-items: center; }
+.voice.off { opacity: 0.45; }
+.voice select { max-width: 132px; }
 .volume { display: flex; gap: 6px; align-items: center; }
 .volume input { width: 90px; }
 #timeline { width: 100%; height: 44px; display: block; cursor: pointer; border-radius: 5px; }
@@ -199,9 +202,13 @@ body.render-mode #stage { position: fixed; inset: 0; }
   .volume input { display: none; }
   .speed { font-size: 0; gap: 0; }
   .speed select { font-size: 13px; }
+  .voice select { max-width: 96px; }
   .tabs button { padding: 10px 2px; font-size: 13px; }
   .tab-body { padding: 8px; }
   .modal { padding: 8px; }
   .dropzone { margin: 10px; padding: 14px; }
   .demo-list { padding: 0 10px 10px; }
 }
+label.field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; color: var(--muted); font-size: 13px; }
+.range-pair { display: flex; gap: 6px; align-items: center; }
+.range-pair select { flex: 1; min-width: 0; }

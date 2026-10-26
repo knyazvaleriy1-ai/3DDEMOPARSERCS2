@@ -21,7 +21,7 @@ from .highlights import DEFAULTS as HIGHLIGHT_DEFAULTS
 from .highlights import detect_highlights
 from .jobs import JobRegistry, import_demo, is_parsed
 from .parser import load_meta
-from .recorder import POV_MODES, pick_highlights, playwright_available, render_highlights
+from .recorder import POV_MODES, VOICE_MODES, pick_highlights, playwright_available, render_highlights, render_pov
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +83,21 @@ class RenderRequest(BaseModel):
     hud: bool = True
     sound: bool = True
     keys: bool = False
+    voice: str = "team"
+    quality: str = "auto"
+
+
+class PovRequest(BaseModel):
+    player: str
+    rounds: list[int] | None = None
+    ff: int = 8
+    width: int = 1280
+    height: int = 720
+    fps: int = 30
+    hud: bool = True
+    sound: bool = True
+    keys: bool = False
+    voice: str = "team"
     quality: str = "auto"
 
 
@@ -405,9 +420,49 @@ def create_app() -> FastAPI:
             hud=req.hud,
             sound=req.sound,
             keys=req.keys,
+            voice=req.voice if req.voice in VOICE_MODES else "team",
             detail=req.quality if req.quality in ("auto", "low", "high") else "auto",
         )
         return {"job": key, "clips": [h["id"] for h in chosen]}
+
+    @app.post("/api/demos/{demo_id}/render-pov")
+    def render_pov_job(demo_id: str, req: PovRequest, request: Request) -> dict[str, Any]:
+        """Server-side headless render of a player's POV over rounds (one MP4)."""
+        _check_id(demo_id)
+        if not playwright_available():
+            raise HTTPException(
+                501,
+                "Рендер на сервере недоступен: pip install playwright && python -m playwright install chromium",
+            )
+        if not is_parsed(demo_id):
+            raise HTTPException(404, "Демо ещё не разобрано")
+        if req.ff not in (0, 4, 8, 16):
+            raise HTTPException(400, "ff: 0, 4, 8 или 16")
+        meta = load_meta(storage.parsed_dir(demo_id))
+        if not any(p["name"].lower() == req.player.lower() for p in meta["players"]):
+            raise HTTPException(400, f"Нет игрока {req.player}")
+        key = f"render-{demo_id}"
+        current = jobs.get(key)
+        if current and current.get("status") in ("queued", "rendering"):
+            raise HTTPException(409, "Рендер этого демо уже идёт")
+        jobs.submit_render(
+            key,
+            render_pov,
+            demo_id,
+            req.player,
+            req.rounds,
+            base_url=str(request.base_url),
+            width=max(320, min(req.width, 3840)),
+            height=max(240, min(req.height, 2160)),
+            fps=max(10, min(req.fps, 120)),
+            ff=req.ff,
+            hud=req.hud,
+            sound=req.sound,
+            keys=req.keys,
+            voice=req.voice if req.voice in VOICE_MODES else "team",
+            detail=req.quality if req.quality in ("auto", "low", "high") else "auto",
+        )
+        return {"job": key}
 
     @app.post("/api/montage")
     def montage(req: MontageRequest, request: Request) -> dict[str, Any]:

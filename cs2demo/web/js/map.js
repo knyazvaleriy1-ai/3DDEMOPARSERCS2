@@ -5,6 +5,7 @@
 import * as THREE from '../vendor/three.module.min.js';
 import { fetchMapMesh, urls } from './backend.js';
 import { paletteFor } from './palettes.js';
+import { MeshRaycaster } from './raycast.js';
 
 const PAINT_PARS = /* glsl */ `
   uniform float cutY;
@@ -141,6 +142,14 @@ function srgb(hex) {
 }
 
 export class MapView {
+  /** Ray caster over the collision mesh (built on first use; null without a mesh). */
+  raycaster() {
+    if (this._ray === undefined) {
+      this._ray = this.mesh ? new MeshRaycaster(this.mesh.attributes.position.array, this.mesh.index.array) : null;
+    }
+    return this._ray;
+  }
+
   constructor(scene) {
     this.scene = scene;
     this.group = new THREE.Group();

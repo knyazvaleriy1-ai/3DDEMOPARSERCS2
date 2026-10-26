@@ -1,6 +1,7 @@
 // Parsed demo in memory: metadata + packed frames, with interpolated lookups.
 import { STATIC, library } from './backend.js';
 import { lerp, lerpAngle } from './util.js';
+import { VoiceTrack } from './voice.js';
 
 export const FLAG = { PRESENT: 1, ALIVE: 2, CT: 4, SCOPED: 8, DEFUSING: 16, HELMET: 32, DEFUSER: 64, AIRBORNE: 128 };
 const TELEPORT = 260; // units per sample: anything faster is a respawn/teleport
@@ -33,6 +34,10 @@ export class DemoData {
     this.money = new Uint16Array(buffer, sec.money.offset, sec.money.bytes / 2);
     // Keys held (on-screen keyboard); absent in demos parsed before it existed.
     this.keys = sec.keys ? new Uint16Array(buffer, sec.keys.offset, sec.keys.bytes / 2) : null;
+    // Voice chat packets (absent in demos parsed before voice support).
+    this.voiceRows = sec.voice ? new Uint32Array(buffer, sec.voice.offset, sec.voice.bytes / 4) : null;
+    this.voiceData = sec.voiceData ? new Uint8Array(buffer, sec.voiceData.offset, sec.voiceData.bytes) : null;
+    this.voiceParsed = !!sec.voice;
     this.keyNames = f.keys || [];
     this.keysKnown = new Set(f.keysKnown || []);
     this.players = meta.players;
@@ -48,6 +53,12 @@ export class DemoData {
     this.scoreboard = meta.scoreboard || [];
     this.weapons = meta.weapons || [''];
     this.places = meta.places || [''];
+  }
+
+  /** Talk spurts of the voice chat (built on first use). */
+  get voice() {
+    if (!this._voice) this._voice = new VoiceTrack(this);
+    return this._voice;
   }
 
   get duration() {

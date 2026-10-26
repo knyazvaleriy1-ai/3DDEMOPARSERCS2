@@ -229,6 +229,20 @@ export function grenades() {
     return takeFromExternrefTable0(ret[0]);
 }
 
+/**
+ * Voice chat packets (like the Python package's `parse_voice`): `{ticks:
+ * Float64Array, steamids: string[], lengths: Uint32Array, data: Uint8Array}`,
+ * `data` holding every packet's Opus bytes back to back.
+ * @returns {any}
+ */
+export function voice() {
+    const ret = wasm.voice();
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
 async function __wbg_load(module, imports) {
     if (typeof Response === 'function' && module instanceof Response) {
         if (typeof WebAssembly.instantiateStreaming === 'function') {

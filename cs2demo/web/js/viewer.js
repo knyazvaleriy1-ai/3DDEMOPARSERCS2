@@ -9,6 +9,8 @@ import { EffectsView } from './effects.js';
 import { Hud } from './hud.js';
 import { LiveAudio } from './audio.js';
 import { clamp } from './util.js';
+import { VOICE_MODES, voiceFilter } from './voice.js';
+import { DEATH_HOLD, deathIn, povBanner, povSpeed, spectateTarget } from './pov.js';
 
 const POV_FOV = 73.74; // CS2: 90° horizontal at 4:3
 const FREE_FOV = 55;
@@ -52,8 +54,13 @@ export class Viewer {
     this.focus = -1;
     this.settings = {
       roofCut: 'auto', cutHeight: 400, labels: true, xray: true, grenades: true, tracers: true,
-      shadows: true, grid: false, radar: false, viewmodel: true, detail: true, keys: loadKeysSetting(),
+      shadows: true, grid: false, radar: false, viewmodel: true, detail: true, holes: true, keys: loadKeysSetting(),
+      voice: loadVoiceSetting(),
+      povFF: loadPovFF(), // POV: fast-forward the rest of the round after the player dies (0 = off)
     };
+    this.banner = null; // {text, ff} line under the score (POV recordings)
+    this._pov = null; // live POV fast-forward state
+    this.voiceHud = null; // voice mode shown by the HUD while recording (else settings.voice)
     this.settings.detail = !this.softwareGL;
     this.clip = null; // highlight shown with a title card (recording)
     this.fixedSize = null;
@@ -129,7 +136,7 @@ export class Viewer {
     ]);
     this.players = new PlayersView(this.scene, demo, assets);
     this.viewmodel = assets ? new Viewmodel() : null;
-    this.effects = new EffectsView(this.scene, demo);
+    this.effects = new EffectsView(this.scene, demo, () => this.map.raycaster());
     this.demo = demo;
     this.applySettings();
     this.bounds = bounds;
@@ -174,6 +181,14 @@ export class Viewer {
     this._emit('settings');
   }
 
+  /** Whose voice chat is heard and shown (voice.js VOICE_MODES; remembered). */
+  setVoice(mode) {
+    if (!VOICE_MODES.includes(mode)) return;
+    this.settings.voice = mode;
+    try { localStorage.setItem(VOICE_SETTING, mode); } catch (_) { /* private mode */ }
+    this._emit('settings');
+  }
+
   applySettings() {
     if (!this.players) return;
     this.map.setOptions({ grid: this.settings.grid, radar: this.settings.radar, detail: this.settings.detail });
@@ -193,6 +208,7 @@ export class Viewer {
     this.players.options.xray = this.settings.xray;
     this.effects.options.grenades = this.settings.grenades;
     this.effects.options.tracers = this.settings.tracers;
+    this.effects.options.holes = this.settings.holes;
   }
 
   // -- playback --------------------------------------------------------------------
@@ -229,6 +245,7 @@ export class Viewer {
 
   setMode(mode, focus = this.focus) {
     if (!CAMERA_MODES.includes(mode)) return;
+    if (this._pov) { this._pov = null; this.banner = null; } // the user takes over
     const prev = this.mode;
     this.mode = mode;
     if (focus !== undefined) this.focus = focus;
@@ -271,6 +288,7 @@ export class Viewer {
   }
 
   setFocus(p) {
+    if (this._pov) { this._pov = null; this.banner = null; }
     this.focus = p;
     this._hasSmooth = false;
     this._hasPrevTarget = false;
@@ -294,8 +312,9 @@ export class Viewer {
       this.renderer.render(this.scene, this.camera);
       return;
     }
+    const ff = this._povAuto();
     if (this.playing) {
-      this.tick += dt * this.demo.tickRate * this.speed;
+      this.tick += dt * this.demo.tickRate * this.speed * ff;
       if (this._rangeEnd !== null && this.tick >= this._rangeEnd) {
         this.tick = this._rangeEnd;
         this._rangeEnd = null;
@@ -311,9 +330,75 @@ export class Viewer {
     }
     this.update(dt);
     if (this.audio) {
-      this.audio.frame(this.demo, this.tick, this.playing, this.speed, this._listener(), this.mode === 'pov' ? this.focus : -1);
+      const owner = this._pov ? this._pov.player : this.focus;
+      this.audio.frame(this.demo, this.tick, this.playing, this.speed * ff, this._listener(), this.mode === 'pov' ? this.focus : -1,
+        { mode: this.settings.voice, focus: owner, steady: ff > 1 });
     }
     this._emit('frame');
+  }
+
+  /**
+   * Live POV fast-forward: once the followed player has been dead for the
+   * death cam, the round runs ``settings.povFF`` times faster watching a living
+   * teammate; when it's over, playback jumps to the next round. Returns the
+   * speed factor for this frame.
+   */
+  _povAuto() {
+    const s = this.settings.povFF;
+    const d = this.demo;
+    const p = this._pov ? this._pov.player : this.focus;
+    if (!s || !this.playing || p < 0 || (this.mode !== 'pov' && !this._pov)) {
+      if (this._pov) this._endPov();
+      return 1;
+    }
+    const rate = d.tickRate;
+    const r = d.rounds[d.roundIndexAt(this.tick)];
+    const death = r ? deathIn(d, p, r) : null;
+    if (!r || !death || this.tick < death.tick + DEATH_HOLD * rate) {
+      if (this._pov) this._endPov();
+      return 1;
+    }
+    const ri = d.rounds.indexOf(r);
+    if (this.tick >= r.end + 2 * rate && ri + 1 < d.rounds.length) {
+      // Round over: on to the next one, back in the player's eyes.
+      const next = d.rounds[ri + 1];
+      this._endPov();
+      this.setTick(next.freezeEnd - 2 * rate);
+      return 1;
+    }
+    if (!this._pov) this._pov = { player: p, watch: -1, scratch: { me: d.state(p, this.tick), st: d.state(p, this.tick) } };
+    const pov = this._pov;
+    if (this.tick < r.end) {
+      const watch = spectateTarget(d, p, this.tick, pov.watch, pov.scratch);
+      if (watch >= 0 && watch !== this.focus) {
+        pov.watch = watch;
+        this.focus = watch;
+        this._hasSmooth = false;
+        this._emit('mode');
+      }
+    }
+    const ff = povSpeed(r, death, this.tick, rate, s);
+    this.banner = povBanner(d, p, this.focus, ff);
+    return ff;
+  }
+
+  _endPov() {
+    const pov = this._pov;
+    this._pov = null;
+    this.banner = null;
+    if (pov && this.focus !== pov.player) {
+      this.focus = pov.player;
+      this._hasSmooth = false;
+      this._emit('mode');
+    }
+  }
+
+  /** Fast-forward speed after the POV player dies (0 = off; remembered). */
+  setPovFF(ff) {
+    this.settings.povFF = ff;
+    try { localStorage.setItem(POV_FF_SETTING, String(ff)); } catch (_) { /* private mode */ }
+    if (!ff) this._endPov();
+    this._emit('settings');
   }
 
   /** Where sounds are heard from: the camera, in world units (Z up). */
@@ -339,7 +424,7 @@ export class Viewer {
     this.players.update(tick, this.states, {
       hidden: cam.hidden, selected: this.focus, bombCarrier: carrier, roundStart,
     });
-    this.effects.update(tick, { roundStart, bomb });
+    this.effects.update(tick, { roundStart, bomb, cut: cam.cut });
     this.map.setCut(cam.cut);
     this.map.follow(this.camera);
     this.renderer.render(this.scene, this.camera);
@@ -358,7 +443,24 @@ export class Viewer {
       povState: this.focus >= 0 ? this.states[this.focus] : null,
       blind: pov ? d.blindAt(this.focus, tick) : 0,
       clip: this.clip,
+      voice: this._speaking(tick),
+      banner: this.banner,
     });
+  }
+
+  /** Players heard on voice chat right now: [{name, side, self}] (null: no voice). */
+  _speaking(tick) {
+    const d = this.demo;
+    const mode = this.voiceHud ?? this.settings.voice;
+    if (!d.voice.available || mode === 'off') return null;
+    const key = `${mode}:${this.focus}`;
+    if (this._voiceKey !== key) {
+      this._voiceKey = key;
+      this._voiceAllow = voiceFilter(d, mode, this.focus);
+    }
+    return d.voice.speakingAt(tick, this._voiceAllow).map((p) => ({
+      name: d.players[p]?.name || '', side: this.states[p].side, self: p === this.focus,
+    }));
   }
 
   /** What the on-screen keyboard shows for the followed player. */
@@ -542,6 +644,22 @@ export class Viewer {
 }
 
 const KEYS_SETTING = 'cs2demo.keys';
+const VOICE_SETTING = 'cs2demo.voice';
+const POV_FF_SETTING = 'cs2demo.povff';
+
+function loadPovFF() {
+  try {
+    const v = Number(localStorage.getItem(POV_FF_SETTING) ?? 8);
+    return [0, 4, 8, 16].includes(v) ? v : 8;
+  } catch (_) { return 8; }
+}
+
+function loadVoiceSetting() {
+  try {
+    const v = localStorage.getItem(VOICE_SETTING);
+    return VOICE_MODES.includes(v) ? v : 'all';
+  } catch (_) { return 'all'; }
+}
 
 function loadKeysSetting() {
   try { return localStorage.getItem(KEYS_SETTING) === '1'; } catch (_) { return false; }

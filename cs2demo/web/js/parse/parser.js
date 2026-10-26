@@ -409,6 +409,9 @@ export function parseLoaded(wasm, { fileName = 'demo.dem', step = 2, progress = 
     console.warn('grenades', err);
   }
 
+  progress(0.76, 'Голосовой чат');
+  const { voice, voiceData } = buildVoice(wasm, lookup);
+
   progress(0.82, 'Статистика');
   const scoreboard = buildScoreboard(wasm, rounds, lookup, players);
   const placeAt = (t, p) => (p < 0 ? '' : places[u8[(frameOf(t) * P + p) * 6 + 5]]);
@@ -438,12 +441,14 @@ export function parseLoaded(wasm, { fileName = 'demo.dem', step = 2, progress = 
     grenades,
     effects,
     scoreboard,
+    voice: { packets: voice.length / 3, speakers: sortedSet(voice.filter((_v, i) => i % 3 === 1)) },
   };
 
   const sections = [];
   const parts = [];
   let offset = 0;
-  for (const [name, arr, dtype] of [['pos', pos, 'float32'], ['ang', ang, 'int16'], ['u8', u8, 'uint8'], ['money', money, 'uint16'], ['keys', keys, 'uint16']]) {
+  for (const [name, arr, dtype] of [['pos', pos, 'float32'], ['ang', ang, 'int16'], ['u8', u8, 'uint8'], ['money', money, 'uint16'], ['keys', keys, 'uint16'],
+    ['voice', voice, 'uint32'], ['voiceData', voiceData, 'uint8']]) {
     sections.push({ name, dtype, offset, bytes: arr.byteLength });
     parts.push([offset, arr]);
     offset += arr.byteLength;
@@ -656,6 +661,35 @@ function buildGrenades(gr, lookup, step) {
   }
   out.sort((a, b) => a.ticks[0] - b.ticks[0]);
   return out;
+}
+
+/** Voice packets of known players: (tick, player, length) rows + their bytes. */
+function buildVoice(wasm, lookup) {
+  let v;
+  try {
+    v = wasm.voice();
+  } catch (err) {
+    console.warn('voice', err);
+    return { voice: new Uint32Array(0), voiceData: new Uint8Array(0) };
+  }
+  const rowsOut = [];
+  let off = 0;
+  for (let i = 0; i < v.ticks.length; i++) {
+    const len = v.lengths[i];
+    const p = lookup.get(v.steamids[i], undefined);
+    if (p >= 0) rowsOut.push([v.ticks[i], p, len, off]);
+    off += len;
+  }
+  rowsOut.sort((a, b) => a[0] - b[0]); // stable, like Python's sorted()
+  const voice = new Uint32Array(rowsOut.length * 3);
+  const voiceData = new Uint8Array(rowsOut.reduce((s, r) => s + r[2], 0));
+  let o = 0;
+  rowsOut.forEach(([tick, p, len, src], i) => {
+    voice.set([tick, p, len], i * 3);
+    voiceData.set(v.data.subarray(src, src + len), o);
+    o += len;
+  });
+  return { voice, voiceData };
 }
 
 function buildScoreboard(wasm, rounds, lookup, players) {

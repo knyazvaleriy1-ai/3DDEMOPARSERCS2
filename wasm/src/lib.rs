@@ -2,7 +2,7 @@
 //!
 //! The demo is copied into wasm memory once (`begin` + `push` in chunks, so a
 //! 500 MB file never exists twice in JS), then parsed in several passes like
-//! the Python package does: `header`, `events`, `ticks`, `grenades`.
+//! the Python package does: `header`, `events`, `ticks`, `grenades`, `voice`.
 //!
 //! Tick data comes back column-wise: numbers as `Float64Array`/`Float32Array`
 //! (NaN = missing), booleans as `Uint8Array` (0, 1, 2 = missing) and strings
@@ -263,4 +263,54 @@ pub fn ticks(props: Vec<String>, ticks: Vec<i32>) -> Result<JsValue, JsError> {
 pub fn grenades() -> Result<JsValue, JsError> {
     let out = run(Pass { player_props: vec![], other_props: vec![], events: vec![], ticks: vec![], projectiles: true })?;
     Ok(columns(out))
+}
+
+/// Voice chat packets (like the Python package's `parse_voice`): `{ticks:
+/// Float64Array, steamids: string[], lengths: Uint32Array, data: Uint8Array}`,
+/// `data` holding every packet's Opus bytes back to back.
+#[wasm_bindgen]
+pub fn voice() -> Result<JsValue, JsError> {
+    HUFFMAN.with(|huf| {
+        let settings = ParserInputs {
+            real_name_to_og_name: AHashMap::default(),
+            wanted_players: vec![],
+            wanted_player_props: vec![],
+            wanted_other_props: vec![],
+            wanted_prop_states: AHashMap::default(),
+            wanted_ticks: vec![],
+            wanted_events: vec![],
+            parse_ents: false,
+            parse_projectiles: false,
+            parse_grenades: false,
+            only_header: false,
+            only_convars: false,
+            huffman_lookup_table: huf,
+            order_by_steamid: false,
+            list_props: false,
+            fallback_bytes: None,
+        };
+        DEMO.with(|d| {
+            let bytes = d.borrow();
+            if bytes.is_empty() {
+                return Err(JsError::new("demo not loaded"));
+            }
+            let out = Parser::new(settings, ParsingMode::Normal).parse_demo(&bytes).map_err(err)?;
+            let (mut ticks, steamids, mut lengths, mut data) = (Vec::new(), Array::new(), Vec::new(), Vec::new());
+            for (tick, packet) in &out.voice_data {
+                if let Some(audio) = &packet.audio {
+                    let payload = audio.voice_data();
+                    ticks.push(*tick as f64);
+                    steamids.push(&JsValue::from_str(&packet.xuid().to_string()));
+                    lengths.push(payload.len() as u32);
+                    data.extend_from_slice(payload);
+                }
+            }
+            let obj = Object::new();
+            set(&obj, "ticks", &Float64Array::from(ticks.as_slice()));
+            set(&obj, "steamids", &steamids);
+            set(&obj, "lengths", &Uint32Array::from(lengths.as_slice()));
+            set(&obj, "data", &Uint8Array::from(data.as_slice()));
+            Ok(obj.into())
+        })
+    })
 }

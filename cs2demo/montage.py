@@ -67,7 +67,7 @@ def select(
 
 _REUSE_KEYS = {
     "width": 1280, "height": 720, "fps": 30, "pov": "first", "slowmo": False, "hud": True, "detail": "auto",
-    "keys": False,
+    "keys": False, "voice": "team",
 }  # fmt: skip
 
 

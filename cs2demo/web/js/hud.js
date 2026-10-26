@@ -55,10 +55,12 @@ export class Hud {
       c.fillRect(0, 0, W, H);
     }
     if (this.options.scorebar) this._scorebar(info, W, s);
+    if (info.banner) this._banner(info.banner, W, s);
     if (this.options.killfeed) this._killfeed(info, W, s);
     if (info.pov && info.povState && info.povState.present) this._povHud(info, W, H, s);
     this._kbTop = null;
     if (info.keys) this._keyboard(info, W, H, s);
+    if (info.voice && info.voice.length) this._voice(info, W, H, s);
     if (info.clip) this._clipCard(info, W, H, s);
   }
 
@@ -255,6 +257,48 @@ export class Hud {
       const size = (34 + 10 * Math.max(0, 1 - age * 5)) * s;
       this._text(text, W / 2, H * 0.68, size, count >= 3 ? '#ffd34d' : '#ffffff', 'center', 800);
       c.globalAlpha = 1;
+    }
+  }
+
+  /** POV line under the score: whose eyes, whom we watch after their death, ▶▶ speed. */
+  _banner(b, W, s) {
+    const c = this.ctx;
+    const ff = b.ff ? `▶▶ ×${b.ff >= 9.5 ? Math.round(b.ff) : b.ff.toFixed(1).replace(/\.0$/, '')}` : '';
+    c.font = `600 ${13 * s}px ${FONT}`;
+    const tw = c.measureText(b.text).width;
+    c.font = `800 ${14 * s}px ${FONT}`;
+    const fw = ff ? c.measureText(ff).width + 12 * s : 0;
+    const w = tw + fw + 24 * s, h = 26 * s, x = W / 2 - w / 2, y = 60 * s;
+    this._panel(x, y, w, h, 6 * s, 'rgba(10,12,15,0.78)', ff ? '#ffb02e' : null);
+    this._text(b.text, x + 12 * s, y + h / 2, 13 * s, '#e7e9ee', 'left', 600);
+    if (ff) this._text(ff, x + 12 * s + tw + 12 * s, y + h / 2, 14 * s, '#ffb02e', 'left', 800);
+  }
+
+  /** Who is talking on voice chat: a mic and the name, lower left. */
+  _voice(info, W, H, s) {
+    const c = this.ctx;
+    const rowH = 26 * s, gap = 4 * s;
+    let y = H - (info.pov ? 64 : 14) * s - rowH;
+    for (const v of info.voice.slice(0, 6).reverse()) {
+      c.font = `600 ${14 * s}px ${FONT}`;
+      const w = c.measureText(v.name).width + 42 * s;
+      const color = COLORS[v.side] || '#e7e9ee';
+      this._panel(12 * s, y, w, rowH, 5 * s, 'rgba(10,12,15,0.78)', v.self ? color : null);
+      // microphone
+      const mx = 12 * s + 15 * s, my = y + rowH / 2;
+      c.fillStyle = color;
+      c.beginPath();
+      c.roundRect(mx - 3.5 * s, my - 8 * s, 7 * s, 11 * s, 3.5 * s);
+      c.fill();
+      c.strokeStyle = color;
+      c.lineWidth = 1.6 * s;
+      c.beginPath();
+      c.arc(mx, my - 2 * s, 6 * s, 0.15 * Math.PI, 0.85 * Math.PI);
+      c.moveTo(mx, my + 4 * s);
+      c.lineTo(mx, my + 8 * s);
+      c.stroke();
+      this._text(v.name, 12 * s + 30 * s, my, 14 * s, color, 'left', 600);
+      y -= rowH + gap;
     }
   }
 

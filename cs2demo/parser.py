@@ -5,13 +5,19 @@ Output (see ``write_parsed``):
 * ``meta.json``  – header, players, rounds, kills, shots, grenades, effects,
   bomb timeline, scoreboard snapshots and auto-detected highlights.
 * ``frames.bin`` – per-player state sampled every ``step`` ticks, stored as
-  four little-endian sections (offsets are listed in ``meta["frames"]``):
+  little-endian sections (offsets are listed in ``meta["frames"]``):
 
   ``pos``   float32[F][P][3]  world X, Y, Z (Hammer units, Z up)
   ``ang``   int16[F][P][2]    yaw, pitch in centi-degrees
   ``u8``    uint8[F][P][6]    health, armor, flags, weapon, duck, place
   ``money`` uint16[F][P]      account balance
   ``keys``  uint16[F][P]      keys held (``KEY_NAMES``) for the on-screen keyboard
+
+  and the voice chat recorded in the demo (FACEIT, ESEA, local POV demos;
+  ``meta["voice"]`` lists who speaks):
+
+  ``voice``     uint32[N][3]  tick, player, byte length of each packet
+  ``voiceData`` uint8[...]    the packets (Opus frames) back to back
 
 Flags: see the ``FLAG_*`` constants below.
 """
@@ -519,6 +525,9 @@ def parse_demo(
     progress(0.7, "Траектории гранат")
     grenades = _build_grenades(parser, lookup, step)
 
+    progress(0.75, "Голосовой чат")
+    voice, voice_data = _build_voice(parser, lookup)
+
     progress(0.8, "Статистика")
     scoreboard = _build_scoreboard(parser, rounds, lookup, players)
     _attach_places(bomb, kills, u8, places, frame_of)
@@ -546,6 +555,7 @@ def parse_demo(
         "grenades": grenades,
         "effects": effects,
         "scoreboard": scoreboard,
+        "voice": {"packets": len(voice), "speakers": sorted({int(p) for p in voice[:, 1]})},
     }
 
     sections = []
@@ -557,6 +567,8 @@ def parse_demo(
         ("u8", u8, "uint8"),
         ("money", money, "uint16"),
         ("keys", keys, "uint16"),
+        ("voice", voice, "uint32"),
+        ("voiceData", voice_data, "uint8"),
     ):
         raw = arr.tobytes(order="C")
         sections.append({"name": name, "dtype": dtype, "offset": offset, "bytes": len(raw)})
@@ -793,6 +805,27 @@ def _build_grenades(parser, lookup: _Players, step: int) -> list[dict[str, Any]]
             )
     out.sort(key=lambda g: g["ticks"][0])
     return out
+
+
+def _build_voice(parser, lookup: _Players) -> tuple[np.ndarray, np.ndarray]:
+    """Voice packets of known players: rows of (tick, player, length) and their
+    bytes. Demos without voice (most GOTV / HLTV demos) give empty arrays."""
+    try:
+        packets = parser.parse_voice()
+    except Exception:  # noqa: BLE001 - older demoparser2 or a broken demo
+        packets = []
+    rows, blobs = [], []
+    for packet in packets:
+        p = lookup.get(packet["steamid"])
+        if p < 0:
+            continue
+        data = bytes(packet["bytes"])
+        rows.append((int(packet["tick"]), p, len(data)))
+        blobs.append(data)
+    order = sorted(range(len(rows)), key=lambda i: rows[i][0])
+    voice = np.array([rows[i] for i in order], dtype="<u4").reshape(-1, 3)
+    data = np.frombuffer(b"".join(blobs[i] for i in order), dtype=np.uint8)
+    return voice, data
 
 
 def _build_scoreboard(parser, rounds, lookup: _Players, players) -> list[dict[str, Any]]:

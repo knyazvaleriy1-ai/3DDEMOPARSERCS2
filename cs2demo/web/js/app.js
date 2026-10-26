@@ -2,8 +2,10 @@
 import { loadDemo } from './demo.js';
 import { Viewer } from './viewer.js';
 import { Timeline } from './timeline.js';
-import { ClipsPanel, HighlightsPanel, PlayersPanel, ViewPanel } from './panels.js';
+import { ClipsPanel, HighlightsPanel, PlayersPanel, ViewPanel, voiceNote, voiceOptions } from './panels.js';
+import { VOICE_LABELS, VOICE_MODES } from './voice.js';
 import { installRenderApi } from './clips.js';
+import { installPovRenderApi } from './pov.js';
 import {
   STATIC, demoIdFor, extractEntry, isArchive, isDemoFile, library, listArchive, parseFile,
 } from './backend.js';
@@ -72,6 +74,7 @@ class App {
     this.highlightsPanel.reset();
     this.clipsPanel.refresh();
     this.viewPanel.render();
+    this._syncVoice();
     this._refreshUi();
   }
 
@@ -298,12 +301,18 @@ class App {
     };
     $('btn-sound').onclick = () => { audio.ensure(); audio.setMuted(!audio.muted); syncSound(); };
     $('btn-keys').onclick = () => v.setKeys(!v.settings.keys);
+    $('btn-povff').onclick = () => this._togglePovFF();
+    $('voice-select').innerHTML = voiceOptions(v.settings.voice);
+    $('voice-select').onchange = (e) => { audio.ensure(); v.setVoice(e.target.value); };
     v.on((type) => {
       if (type !== 'settings') return;
       $('btn-keys').classList.toggle('active', v.settings.keys);
+      $('btn-povff').classList.toggle('active', !!v.settings.povFF);
+      $('voice-select').value = v.settings.voice;
       this.viewPanel.render();
     });
     $('btn-keys').classList.toggle('active', v.settings.keys);
+    $('btn-povff').classList.toggle('active', !!v.settings.povFF);
     $('volume').oninput = (e) => { audio.ensure(); audio.setVolume(Number(e.target.value)); if (audio.muted) audio.setMuted(false); syncSound(); };
     syncSound();
     $('round-select').onchange = (e) => {
@@ -324,12 +333,45 @@ class App {
         case 'Escape': this.hideLibrary(); break;
         case 'KeyM': $('btn-sound').click(); break;
         case 'KeyK': v.setKeys(!v.settings.keys); break;
+        case 'KeyV': this._cycleVoice(); break;
+        case 'KeyF': this._togglePovFF(); break;
         default: {
           const modes = { Digit1: 'free', Digit2: 'follow', Digit3: 'pov', Digit4: 'chase', Digit5: 'top', Digit6: 'overview' };
           if (modes[e.code]) v.setMode(modes[e.code]);
         }
       }
     });
+  }
+
+  _togglePovFF() {
+    const v = this.viewer;
+    if (v.settings.povFF) this._lastPovFF = v.settings.povFF;
+    v.setPovFF(v.settings.povFF ? 0 : this._lastPovFF || 8);
+    toast(v.settings.povFF
+      ? `От 1-го лица: после смерти игрока раунд ускоряется ×${v.settings.povFF}`
+      : 'Ускорение после смерти выключено');
+  }
+
+  _cycleVoice() {
+    const v = this.viewer;
+    if (!this.demo.voice.available) { toast(voiceNote(this.demo)); return; }
+    v.audio?.ensure();
+    const next = VOICE_MODES[(VOICE_MODES.indexOf(v.settings.voice) + 1) % VOICE_MODES.length];
+    v.setVoice(next);
+    toast(`Войс: ${VOICE_LABELS[next]}`);
+  }
+
+  /** Voice selector state for the open demo (and load the Opus decoder early). */
+  _syncVoice() {
+    const d = this.demo;
+    const sel = $('voice-select');
+    const has = !!d && d.voice.available;
+    sel.disabled = !has;
+    sel.parentElement.title = has
+      ? `Голосовой чат: ${d.voice.speakers.map((p) => d.players[p]?.name).join(', ')} (V — переключить)`
+      : d ? voiceNote(d) : '';
+    sel.parentElement.classList.toggle('off', !has);
+    if (has) d.voice.ready();
   }
 
   _speedStep(dir) {
@@ -382,6 +424,7 @@ async function main() {
   if (RENDER_MODE) {
     document.body.classList.add('render-mode');
     const api = installRenderApi(app.viewer, () => app.demo);
+    installPovRenderApi(api);
     try {
       const id = params.get('demo');
       app.viewer.setFixedSize({ width: window.innerWidth, height: window.innerHeight });

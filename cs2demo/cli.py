@@ -136,14 +136,17 @@ def cmd_highlights(args: argparse.Namespace) -> None:
         _print_highlights(chosen)
 
 
-def _render_opts(args: argparse.Namespace) -> dict:
+def _output_opts(args: argparse.Namespace) -> dict:
     try:
         width, height = (int(v) for v in args.res.lower().split("x"))
     except ValueError as exc:
         raise SystemExit("--res в формате 1280x720") from exc
-    return {"width": width, "height": height, "fps": args.fps, "pov": args.pov,
-            "slowmo": args.slowmo, "hud": not args.no_hud, "sound": not args.no_sound, "keys": args.keys,
-            "detail": args.quality}
+    return {"width": width, "height": height, "fps": args.fps, "hud": not args.no_hud, "sound": not args.no_sound,
+            "keys": args.keys, "voice": args.voice, "detail": args.quality}
+
+
+def _render_opts(args: argparse.Namespace) -> dict:
+    return {**_output_opts(args), "pov": args.pov, "slowmo": args.slowmo}
 
 
 def cmd_render(args: argparse.Namespace) -> None:
@@ -227,6 +230,31 @@ def cmd_montage(args: argparse.Namespace) -> None:
         print(f"  #{i:<2} {c['title']}  ({c['score']} очк.)")
 
 
+def cmd_pov(args: argparse.Namespace) -> None:
+    """A player's first-person view over whole rounds, fast-forward after their death."""
+    from .recorder import (
+        BackgroundServer,
+        parse_rounds,
+        playwright_available,
+        render_pov,
+    )
+
+    if not playwright_available():
+        raise SystemExit("Нужен Playwright: pip install playwright && python -m playwright install chromium")
+    try:
+        rounds = parse_rounds(args.rounds)
+    except ValueError as exc:
+        raise SystemExit("--rounds в формате 1-12 или 3,5,7-9") from exc
+    opts = _output_opts(args)
+    for demo_id in _resolve_demos(args.demo):
+        with BackgroundServer() as srv:
+            r = render_pov(
+                demo_id, args.player, rounds, base_url=srv.url, ff=args.ff, progress=_render_progress, **opts
+            )
+        rounds_done = f"{r['rounds'][0]}–{r['rounds'][-1]}"
+        print(f"\n  {r['path']}  ({r['duration']} с, раунды {rounds_done}, рендер {r['renderSeconds']} с)")
+
+
 def _render_progress(fraction: float, message: str) -> None:
     print(f"\r[{fraction * 100:5.1f}%] {message[:110]:<110}", end="", flush=True)
 
@@ -248,12 +276,18 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--player", help="только хайлайты игрока (подстрока ника)")
     p.add_argument("--pov", choices=["first", "third", "overview"], default="first",
                    help="камера: от первого лица / от третьего / сверху")
+    p.add_argument("--slowmo", action="store_true", help="замедление в момент киллов")
+    _add_output_args(p)
+
+
+def _add_output_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--res", default="1280x720", help="разрешение, например 1920x1080")
     p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--slowmo", action="store_true", help="замедление в момент киллов")
     p.add_argument("--no-hud", action="store_true", help="без HUD и килфида")
     p.add_argument("--no-sound", action="store_true", help="без звука")
     p.add_argument("--keys", action="store_true", help="экранная клавиатура: какие клавиши жмёт игрок")
+    p.add_argument("--voice", choices=["all", "team", "player", "T", "CT", "off"], default="team",
+                   help="войс игроков из демо (FACEIT и др.): все / команда игрока / только он / сторона / выкл")
     p.add_argument("--quality", choices=["auto", "low", "high"], default="auto",
                    help="материалы карты: auto — полные на GPU, упрощённые на CPU")
 
@@ -297,6 +331,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--clips", help="id хайлайтов через запятую")
     _add_render_args(p)
     p.set_defaults(func=cmd_render)
+
+    p = sub.add_parser("pov", help="POV игрока по раундам в один MP4: после смерти раунд ускоряется")
+    p.add_argument("demo", help="id демо или путь к .dem / .rar")
+    p.add_argument("--player", required=True, help="ник игрока (или его часть)")
+    p.add_argument("--rounds", help="раунды: 1-12 или 3,5,7-9 (по умолчанию все)")
+    p.add_argument("--ff", type=int, choices=[0, 4, 8, 16], default=8,
+                   help="во сколько раз ускорять раунд после смерти игрока (0 — вырезать)")
+    _add_output_args(p)
+    p.set_defaults(func=cmd_pov)
 
     p = sub.add_parser("watch", help="следить за папкой с демо и автоматически записывать клипы")
     p.add_argument("folder")
