@@ -1,12 +1,14 @@
 // Parse worker: loads the WebAssembly demoparser, copies the demo into its
 // memory in chunks and runs the JS port of the Python parser. Demos inside a
-// .rar are unpacked on the fly straight into the parser (parse/rar.js).
+// .rar are unpacked on the fly straight into the parser (parse/rar.js), and
+// so are compressed demos (FACEIT: .dem.zst, older .dem.gz).
 //
 // Messages: {op: 'list', file}               -> {type: 'entries', entries}
 //           {op: 'parse', file, entry, step} -> {type: 'done', meta, frames}
 //           {op: 'extract', file, entry}     -> {type: 'done', blob}
 // ("entry" = {name, size} of a file in the archive, null for a plain .dem)
 import init, * as wasm from '../../vendor/demoparser/cs2wasm.js';
+import { Decompress } from '../../vendor/fzstd/fzstd.mjs';
 import { parseLoaded } from './parser.js';
 import { baseName, openRar } from './rar.js';
 
@@ -40,14 +42,73 @@ function unpack(rar, entry, sink, label, share = 1) {
   if (got !== entry.size) throw new Error(`Файл ${baseName(entry.name)} распакован не полностью (${got} из ${entry.size} байт)`);
 }
 
+/** Size of the demo inside a .zst (frame header) / .gz (trailer), or 0 when it doesn't say. */
+async function unpackedSize(file, kind) {
+  if (kind === 'gzip') {
+    const t = new DataView(await file.slice(Math.max(0, file.size - 4)).arrayBuffer());
+    return t.byteLength === 4 ? t.getUint32(0, true) : 0;
+  }
+  const h = new Uint8Array(await file.slice(0, 18).arrayBuffer());
+  const fhd = h[4];
+  const single = (fhd >> 5) & 1, fcsFlag = fhd >> 6;
+  let p = 5 + (single ? 0 : 1) + [0, 1, 2, 4][fhd & 3];
+  const n = [single ? 1 : 0, 2, 4, 8][fcsFlag];
+  let size = 0;
+  for (let i = n - 1; i >= 0; i--) size = size * 256 + h[p + i];
+  return n === 2 ? size + 256 : size;
+}
+
+/** 'zstd' / 'gzip' when ``file`` is compressed (by its first bytes), else null. */
+async function compression(file) {
+  const h = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  if (h[0] === 0x28 && h[1] === 0xb5 && h[2] === 0x2f && h[3] === 0xfd) return 'zstd';
+  if (h[0] === 0x1f && h[1] === 0x8b) return 'gzip';
+  return null;
+}
+
+/** Decompress ``file`` chunk by chunk into ``sink``; ``onRead(bytesRead)``. */
+async function unpackStream(file, kind, sink, onRead) {
+  if (kind === 'gzip') {
+    let read = 0;
+    const counted = file.stream().pipeThrough(new TransformStream({
+      transform(chunk, ctl) { read += chunk.length; onRead(read); ctl.enqueue(chunk); },
+    }));
+    const reader = counted.pipeThrough(new DecompressionStream('gzip')).getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      sink(value);
+    }
+    return;
+  }
+  const z = new Decompress((chunk) => sink(chunk));
+  for (let off = 0; off < file.size; off += CHUNK) {
+    const end = Math.min(file.size, off + CHUNK);
+    z.push(new Uint8Array(await file.slice(off, end).arrayBuffer()), end >= file.size);
+    onRead(end);
+  }
+}
+
 async function parse(file, entry, step) {
   progress(0, 'Загрузка парсера');
-  const pre = entry ? 0.25 : 0.1; // share of the bar for reading / unpacking
+  const pre = entry || /\.(zst|gz)$/i.test(file.name) ? 0.25 : 0.1; // share of the bar for reading / unpacking
   await init({ module_or_path: new URL('../../vendor/demoparser/cs2wasm_bg.wasm', import.meta.url) });
+  const packed = entry ? null : await compression(file);
   if (entry) {
     const rar = await openArchive(file);
     wasm.begin(entry.size);
     unpack(rar, entry, (chunk) => wasm.push(chunk), 'Распаковка архива', pre);
+  } else if (packed) {
+    // Unknown size: guess, the buffer grows if needed.
+    wasm.begin((await unpackedSize(file, packed)) || file.size * 3);
+    let last = 0, got = 0;
+    await unpackStream(file, packed, (chunk) => { wasm.push(chunk); got += chunk.length; }, (read) => {
+      if (read - last > CHUNK || read === file.size) {
+        last = read;
+        progress((0.25 * read) / file.size, 'Распаковка демо');
+      }
+    });
+    if (!got) throw new Error('Архив пуст');
   } else {
     wasm.begin(file.size);
     for (let off = 0; off < file.size; off += CHUNK) {
@@ -57,7 +118,7 @@ async function parse(file, entry, step) {
     }
   }
   const { meta, frames } = parseLoaded(wasm, {
-    fileName: entry ? baseName(entry.name) : file.name,
+    fileName: entry ? baseName(entry.name) : file.name.replace(/\.(zst|gz)$/i, ''),
     step,
     now: () => performance.now(),
     progress: (f, m) => progress(pre + (1 - pre) * f, m),

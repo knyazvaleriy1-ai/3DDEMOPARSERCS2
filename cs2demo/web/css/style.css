@@ -191,6 +191,8 @@ body.render-mode #stage { position: fixed; inset: 0; }
 
 /* phones */
 @media (max-width: 640px) {
+  .faceit-form { flex-wrap: wrap; }
+  .faceit-form .btn { flex: 1; justify-content: center; }
   #topbar { gap: 8px; padding: 0 8px; }
   #topbar .btn { padding: 6px 10px; }
   .demo-title { font-size: 12px; }
@@ -212,3 +214,7 @@ body.render-mode #stage { position: fixed; inset: 0; }
 label.field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; color: var(--muted); font-size: 13px; }
 .range-pair { display: flex; gap: 6px; align-items: center; }
 .range-pair select { flex: 1; min-width: 0; }
+.faceit-form { display: flex; gap: 8px; margin: 0 16px; }
+.faceit-form input { flex: 1; min-width: 0; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--panel-2); color: inherit; font: inherit; }
+.faceit-note { margin: 6px 16px 12px; }

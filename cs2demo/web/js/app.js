@@ -4,10 +4,13 @@ import { Viewer } from './viewer.js';
 import { Timeline } from './timeline.js';
 import { ClipsPanel, HighlightsPanel, PlayersPanel, ViewPanel, voiceNote, voiceOptions } from './panels.js';
 import { VOICE_LABELS, VOICE_MODES } from './voice.js';
+import {
+  MANUAL_HINT, bookmarklet, downloadDemo, faceitMatchId, faceitStatus, resolveMatch, serverDownload,
+} from './faceit.js';
 import { installRenderApi } from './clips.js';
 import { installPovRenderApi } from './pov.js';
 import {
-  STATIC, demoIdFor, extractEntry, isArchive, isDemoFile, library, listArchive, parseFile,
+  STATIC, demoIdFor, demoName, extractEntry, isArchive, isCompressed, isDemoFile, library, listArchive, parseFile,
 } from './backend.js';
 import { esc, fetchJSON, fmtTime, toast } from './util.js';
 
@@ -82,6 +85,7 @@ class App {
 
   async showLibrary() {
     $('library').classList.remove('hidden');
+    this._faceitNote();
     const list = $('demo-list');
     list.innerHTML = '<p class="muted">Загрузка списка…</p>';
     let demos = [];
@@ -119,17 +123,40 @@ class App {
     if (this.demo) $('library').classList.add('hidden');
   }
 
-  /** A .dem, or a .rar with demos inside (HLTV), into the library; opens the first one. */
-  async upload(file) {
-    if (!file) return;
-    const archive = isArchive(file.name);
-    if (!archive && !isDemoFile(file.name)) { toast('Нужен файл .dem или архив .rar', 'error'); return; }
+  /** Progress bar + status line of the library dialog. */
+  _uploadUi() {
     $('library').classList.remove('hidden');
     const bar = $('upload-progress');
     const text = $('upload-text');
     bar.classList.remove('hidden');
     const setBar = (f) => { bar.firstElementChild.style.width = `${Math.round(f * 100)}%`; };
     setBar(0);
+    return { bar, text, setBar };
+  }
+
+  /** Open the first of the demos just added (and auto-record if asked). */
+  async _openAdded(ids) {
+    const auto = this.highlightsPanel.opts.auto;
+    if (this.demo) location.href = `?demo=${encodeURIComponent(ids[0])}${auto ? '&autorecord=1' : ''}`;
+    else {
+      $('library').classList.add('hidden');
+      await this.open(ids[0]);
+      if (auto) this.highlightsPanel.autoRecord(5);
+    }
+  }
+
+  /**
+   * A .dem, a .rar with demos inside (HLTV) or a .dem.zst (FACEIT) into the
+   * library; opens the first one.
+   */
+  async upload(file) {
+    if (!file) return;
+    const archive = isArchive(file.name);
+    if (!archive && !isDemoFile(file.name) && !isCompressed(file.name)) {
+      toast('Нужен файл .dem, архив .rar или .dem.zst', 'error');
+      return;
+    }
+    const { bar, text, setBar } = this._uploadUi();
     text.textContent = `${archive ? 'Открытие архива' : 'Загрузка'} ${file.name}…`;
     try {
       let entries = [null];
@@ -146,13 +173,7 @@ class App {
       }
       setBar(1);
       text.textContent = 'Готово!';
-      const auto = this.highlightsPanel.opts.auto;
-      if (this.demo) location.href = `?demo=${encodeURIComponent(ids[0])}${auto ? '&autorecord=1' : ''}`;
-      else {
-        $('library').classList.add('hidden');
-        await this.open(ids[0]);
-        if (auto) this.highlightsPanel.autoRecord(5);
-      }
+      await this._openAdded(ids);
     } catch (err) {
       text.textContent = err.message;
       toast(err.message, 'error', 8000);
@@ -187,21 +208,99 @@ class App {
       form.append('file', dem);
       xhr.send(form);
     });
-    let status = res;
+    await this._waitParsed(res.id, res, span(0.5, 1), text, label);
+    return res.id;
+  }
+
+  /** Server version: wait until the server has parsed demo ``id``. */
+  async _waitParsed(id, status, setBar, text, label = '') {
+    status ??= await fetchJSON(`/api/demos/${id}`);
     while (status.status !== 'ready') {
       if (status.status === 'error') throw new Error(status.message || 'Ошибка разбора');
-      span(0.5, 1)(status.progress || 0);
+      setBar(status.progress || 0);
       text.textContent = `Разбор демо${label}: ${status.message || '…'}`;
       await new Promise((r) => setTimeout(r, 600));
-      status = await fetchJSON(`/api/demos/${res.id}`);
+      status = await fetchJSON(`/api/demos/${id}`);
     }
-    return res.id;
+  }
+
+  // -- FACEIT --------------------------------------------------------------------------
+
+  /** Download the demo of a FACEIT match (link or id), parse it and open it. */
+  async faceit(link) {
+    const id = faceitMatchId(link);
+    if (!id) { toast('Не похоже на ссылку на матч FACEIT (нужна ссылка вида faceit.com/…/room/1-…)', 'error'); return; }
+    if (this._faceitBusy) { toast('Скачивание уже идёт'); return; }
+    this._faceitBusy = true;
+    $('faceit-link').value = link;
+    const { bar, text, setBar } = this._uploadUi();
+    text.textContent = 'Матч на FACEIT…';
+    try {
+      const ids = STATIC ? await this._faceitStatic(id, setBar, text) : await this._faceitServer(link, setBar, text);
+      setBar(1);
+      text.textContent = 'Готово!';
+      $('faceit-link').value = '';
+      await this._openAdded(ids);
+    } catch (err) {
+      text.textContent = err.message;
+      toast(err.message, 'error', 12000);
+    } finally {
+      this._faceitBusy = false;
+      setTimeout(() => bar.classList.add('hidden'), 1500);
+    }
+  }
+
+  async _faceitServer(link, setBar, text) {
+    const result = await serverDownload(link, (f, m) => { setBar(0.5 * f); text.textContent = `FACEIT: ${m}`; });
+    const ids = result.ids || [];
+    if (!ids.length) throw new Error('В матче не нашлось демо');
+    for (const [i, id] of ids.entries()) {
+      const label = ids.length > 1 ? ` (${i + 1} из ${ids.length})` : '';
+      await this._waitParsed(id, null, (f) => setBar(0.5 + 0.5 * f), text, label);
+    }
+    return ids;
+  }
+
+  async _faceitStatic(matchId, setBar, text) {
+    const { match, demos } = await resolveMatch(matchId);
+    if (!demos?.length) throw new Error('У матча нет демо');
+    const ids = [];
+    const lastModified = (match.finishedAt || 0) * 1000; // same match -> same library id
+    for (const [i, d] of demos.entries()) {
+      const label = demos.length > 1 ? ` (${i + 1} из ${demos.length})` : '';
+      let known = null;
+      const file = await downloadDemo(d, {
+        lastModified,
+        exists: async (f) => { known = demoIdFor(f); return library.has(known); },
+        onProgress: (f, got) => {
+          setBar(0.4 * f);
+          text.textContent = `Скачивание демо ${match.title || ''}${label}: ${Math.round(got / 1e6)} МБ`;
+        },
+      });
+      ids.push(file ? await this._parseLocal(file, null, (f) => setBar(0.4 + 0.6 * f), text, label) : known);
+    }
+    return ids;
+  }
+
+  /** Under the FACEIT field: what works here. */
+  async _faceitNote() {
+    const note = $('faceit-note');
+    const st = await faceitStatus();
+    if (st.configured) {
+      note.innerHTML = `Демо скачается и откроется (FACEIT хранит демо около 30 дней). Можно просто вставить ссылку
+        (Ctrl+V) в любом месте. Закладка для страницы матча: <a href="${esc(bookmarklet())}" class="link"
+        title="Перетащите на панель закладок и нажимайте на странице матча FACEIT">CS2 3D ▸</a>`;
+    } else if (st.available) {
+      note.textContent = `Для скачивания по ссылке нужен ключ FACEIT API на ${STATIC ? 'сайте (FACEIT_API_KEY в настройках Vercel)' : 'сервере (переменная FACEIT_API_KEY)'}. ${MANUAL_HINT}`;
+    } else {
+      note.textContent = `Скачивание по ссылке работает в версии сайта на Vercel или на своём сервере. ${MANUAL_HINT}`;
+    }
   }
 
   /** Static version: parse in a worker, keep the result in IndexedDB. */
   async _parseLocal(file, entry, setBar, text, label) {
     const id = demoIdFor(file, entry);
-    const name = entry ? entry.name.split(/[\\/]/).pop() : file.name;
+    const name = entry ? entry.name.split(/[\\/]/).pop() : demoName(file.name);
     if (await library.has(id)) return id; // parsed before: just open it
     text.textContent = `Разбор ${name}${label}…`;
     const { meta, frames } = await parseFile(file, {
@@ -271,6 +370,19 @@ class App {
     for (const input of [$('file-input'), $('file-input-2')]) {
       input.addEventListener('change', () => { this.upload(input.files[0]); input.value = ''; });
     }
+    $('faceit-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.faceit($('faceit-link').value.trim());
+    });
+    // A FACEIT match link pasted anywhere (outside text fields) downloads it.
+    window.addEventListener('paste', (e) => {
+      if (e.target.matches?.('input, textarea')) return;
+      const text = e.clipboardData?.getData('text') || '';
+      if (faceitMatchId(text)) {
+        e.preventDefault();
+        this.faceit(text.trim());
+      }
+    });
     const dz = $('dropzone');
     window.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('over'); });
     window.addEventListener('dragleave', (e) => { if (!e.relatedTarget) dz.classList.remove('over'); });
@@ -438,7 +550,14 @@ async function main() {
     return;
   }
   const id = params.get('demo');
-  if (id) {
+  const faceitLink = params.get('faceit');
+  if (faceitLink) {
+    // ?faceit=<match link>: from the bookmarklet on a FACEIT match page.
+    history.replaceState(null, '', location.pathname);
+    $('stage-msg').classList.add('hidden');
+    app.showLibrary();
+    await app.faceit(faceitLink);
+  } else if (id) {
     await app.open(id);
     if (params.get('autorecord') === '1' && app.demo) {
       history.replaceState(null, '', `?demo=${encodeURIComponent(id)}`);

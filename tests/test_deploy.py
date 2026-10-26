@@ -17,3 +17,12 @@ def test_vercel_config_builds_into_its_output_directory():
         assert rule["source"].startswith("/")
     ignored = (ROOT / ".vercelignore").read_text().split()
     assert not {"cs2demo/", "scripts/", "scripts/vercel_build.sh"} & set(ignored)
+
+
+def test_vercel_functions_exist():
+    cfg = json.loads((ROOT / "vercel.json").read_text())
+    for path, opts in cfg.get("functions", {}).items():
+        assert (ROOT / path).is_file(), path
+        assert opts["maxDuration"] <= 60  # the Hobby plan's limit without fluid compute
+    ignored = (ROOT / ".vercelignore").read_text().split()
+    assert "api/" not in ignored

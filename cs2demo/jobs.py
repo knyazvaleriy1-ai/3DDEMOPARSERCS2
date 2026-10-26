@@ -23,6 +23,7 @@ class JobRegistry:
         self._jobs: dict[str, dict[str, Any]] = {}
         self._parse_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="parse")
         self._render_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="render")
+        self._download_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="download")
 
     # -- bookkeeping -------------------------------------------------------------
 
@@ -81,6 +82,28 @@ class JobRegistry:
             return result
 
         return self._render_pool.submit(run)
+
+    # -- downloads (FACEIT) ------------------------------------------------------
+
+    def submit_download(self, key: str, fn, *args, **kwargs):
+        """Run ``fn(*args, progress=…)`` in the background; its return value
+        becomes the job's ``result``."""
+        self.update(key, kind="download", status="queued", progress=0.0, message="В очереди", result=None)
+
+        def run():
+            def progress(fraction: float, message: str) -> None:
+                self.update(key, status="downloading", progress=round(fraction, 3), message=message)
+
+            try:
+                result = fn(*args, progress=progress, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("download %s failed: %s", key, exc)
+                self.update(key, status="error", message=str(exc))
+                return None
+            self.update(key, status="done", progress=1.0, message="Готово", result=result)
+            return result
+
+        return self._download_pool.submit(run)
 
 
 def parse_and_store(demo_id: str, dem_path: Path, step: int | None = None, progress=None) -> dict[str, Any]:

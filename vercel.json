@@ -32,5 +32,10 @@
         }
       ]
     }
-  ]
+  ],
+  "functions": {
+    "api/faceit.js": {
+      "maxDuration": 60
+    }
+  }
 }
