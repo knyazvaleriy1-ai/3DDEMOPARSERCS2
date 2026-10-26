@@ -1,4 +1,5 @@
 // Parsed demo in memory: metadata + packed frames, with interpolated lookups.
+import { STATIC, library } from './backend.js';
 import { lerp, lerpAngle } from './util.js';
 
 export const FLAG = { PRESENT: 1, ALIVE: 2, CT: 4, SCOPED: 8, DEFUSING: 16, HELMET: 32, DEFUSER: 64 };
@@ -213,6 +214,12 @@ export class DemoData {
 }
 
 export async function loadDemo(id, onProgress) {
+  if (STATIC) {
+    onProgress?.(0.3, 'Чтение из хранилища браузера');
+    const rec = await library.get(id);
+    if (!rec) throw new Error('Этого демо нет в браузере — откройте .dem файл заново');
+    return new DemoData(rec.meta, rec.frames);
+  }
   const meta = await fetch(`/api/demos/${id}/meta`).then((r) => {
     if (!r.ok) throw new Error('Не удалось загрузить данные демо');
     return r.json();

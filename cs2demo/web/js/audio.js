@@ -3,6 +3,7 @@
 //
 // Users can replace any sound with their own file: put e.g. ``ak47.wav`` into
 // ``<data>/sounds/`` (names: see SOUND_NAMES) and it is used instead.
+import { urls } from './backend.js';
 import { firesBullets, weaponIcon } from './util.js';
 
 export const SOUND_NAMES = [
@@ -285,7 +286,8 @@ async function fetchOverrides() {
   if (overrideFiles) return overrideFiles;
   overrideFiles = {};
   try {
-    const list = await fetch('/api/sounds').then((r) => (r.ok ? r.json() : []));
+    const url = urls.sounds();
+    const list = url ? await fetch(url).then((r) => (r.ok ? r.json() : [])) : [];
     await Promise.all(list.map(async (s) => {
       const res = await fetch(s.url);
       if (res.ok) overrideFiles[s.name] = await res.arrayBuffer();

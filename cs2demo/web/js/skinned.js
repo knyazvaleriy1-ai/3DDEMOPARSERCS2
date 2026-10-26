@@ -3,6 +3,7 @@
 // idle / walk / run clips blended by speed; on top of that the code bends the
 // legs for crouching, leans the spine with the view pitch, solves two-bone IK so
 // the hands hold the active weapon, and drops the body when the player dies.
+import { urls } from './backend.js';
 import * as THREE from '../vendor/three.module.min.js';
 import { GLTFLoader } from '../vendor/GLTFLoader.js';
 import * as SkeletonUtils from '../vendor/SkeletonUtils.js';
@@ -38,7 +39,7 @@ function findBones(root) {
 export async function loadPlayerAssets() {
   let info;
   try {
-    info = await fetch('/api/models').then((r) => (r.ok ? r.json() : null));
+    info = await fetch(urls.models()).then((r) => (r.ok ? r.json() : null));
   } catch (_) {
     return null;
   }
@@ -50,7 +51,7 @@ export async function loadPlayerAssets() {
     const file = info[side.toLowerCase()]?.file;
     if (!file) return null;
     if (!byFile.has(file)) {
-      byFile.set(file, loader.loadAsync(`/api/models/file/${encodeURIComponent(file)}`).then(prepare).catch((err) => {
+      byFile.set(file, loader.loadAsync(urls.modelFile(file)).then(prepare).catch((err) => {
         console.warn('player model failed to load', err);
         return null;
       }));

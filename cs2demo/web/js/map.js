@@ -3,6 +3,7 @@
 // tiled roofs), lit by a shadow-casting sun and a sky dome. Falls back to a flat
 // radar plane, or a grid if nothing is available.
 import * as THREE from '../vendor/three.module.min.js';
+import { fetchMapMesh, urls } from './backend.js';
 import { paletteFor } from './palettes.js';
 
 const PAINT_PARS = /* glsl */ `
@@ -235,7 +236,7 @@ export class MapView {
   async load(mapName, playerBounds, lights) {
     let info = null;
     try {
-      info = await fetch(`/api/maps/${mapName}/info`).then((r) => r.json());
+      info = await fetch(urls.mapInfo(mapName)).then((r) => r.json());
     } catch (_) { /* offline */ }
     this.info = info;
     const xf = info && info.transform;
@@ -244,7 +245,7 @@ export class MapView {
 
     const radarTasks = [];
     if (xf) {
-      radarTasks.push(loadTexture(`/api/maps/${mapName}/radar`).then((tex) => {
+      radarTasks.push(loadTexture(urls.mapRadar(mapName)).then((tex) => {
         if (!tex) return;
         this.uniforms.radar.value = tex;
         this.uniforms.hasRadar.value = 1;
@@ -252,7 +253,7 @@ export class MapView {
         this.radarTex = tex;
       }));
       if (info.lower) {
-        radarTasks.push(loadTexture(`/api/maps/${mapName}/radar?lower=1`).then((tex) => {
+        radarTasks.push(loadTexture(urls.mapRadar(mapName, true)).then((tex) => {
           if (!tex) return;
           this.uniforms.radarLower.value = tex;
           this.uniforms.hasLower.value = 1;
@@ -263,8 +264,8 @@ export class MapView {
 
     let mesh = null;
     try {
-      const res = await fetch(`/api/maps/${mapName}/mesh`);
-      if (res.ok) mesh = parseMesh(await res.arrayBuffer());
+      const buf = await fetchMapMesh(mapName);
+      if (buf) mesh = parseMesh(buf);
     } catch (err) {
       console.warn('map mesh unavailable', err);
     }

@@ -158,7 +158,8 @@ export class Viewer {
     const b = this.bounds;
     const c = b.getCenter(new THREE.Vector3());
     const size = b.getSize(new THREE.Vector3());
-    const span = Math.max(size.x, size.z);
+    // Portrait screens (phones) see less sideways: back off so the map fits.
+    const span = Math.max(size.x, size.z) * Math.max(1, 1.25 / (this.camera.aspect || 1));
     this.controls.target.copy(c);
     this.camera.position.set(c.x + span * 0.25, c.y + span * 0.75, c.z + span * 0.55);
     this.camera.fov = FREE_FOV;

@@ -4,6 +4,7 @@ import { Viewer } from './viewer.js';
 import { Timeline } from './timeline.js';
 import { ClipsPanel, HighlightsPanel, PlayersPanel, ViewPanel } from './panels.js';
 import { installRenderApi } from './clips.js';
+import { STATIC, demoIdFor, library, parseFile } from './backend.js';
 import { esc, fetchJSON, fmtTime, toast } from './util.js';
 
 const $ = (id) => document.getElementById(id);
@@ -80,13 +81,15 @@ class App {
     list.innerHTML = '<p class="muted">Загрузка списка…</p>';
     let demos = [];
     try {
-      demos = await fetchJSON('/api/demos');
+      demos = STATIC ? await library.list() : await fetchJSON('/api/demos');
     } catch (err) {
-      list.innerHTML = `<p class="muted">Сервер недоступен: ${esc(err.message)}</p>`;
+      list.innerHTML = `<p class="muted">${STATIC ? 'Хранилище браузера недоступно' : 'Сервер недоступен'}: ${esc(err.message)}</p>`;
       return;
     }
     if (!demos.length) {
-      list.innerHTML = '<p class="muted">Пока нет разобранных демо. Загрузите .dem файл — он появится здесь.</p>';
+      list.innerHTML = STATIC
+        ? '<p class="muted">Пока нет демо. Откройте .dem файл — он разберётся прямо в браузере и сохранится на этом устройстве.</p>'
+        : '<p class="muted">Пока нет разобранных демо. Загрузите .dem файл — он появится здесь.</p>';
       return;
     }
     list.innerHTML = demos.map((d) => {
@@ -121,7 +124,7 @@ class App {
     const setBar = (f) => { bar.firstElementChild.style.width = `${Math.round(f * 100)}%`; };
     text.textContent = `Загрузка ${file.name}…`;
     try {
-      const res = await new Promise((resolve, reject) => {
+      const res = STATIC ? await this._parseLocal(file, setBar, text) : await new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/api/demos');
         xhr.upload.onprogress = (e) => e.lengthComputable && setBar(0.5 * e.loaded / e.total);
@@ -136,7 +139,7 @@ class App {
         form.append('file', file);
         xhr.send(form);
       });
-      let status = res;
+      let status = STATIC ? { status: 'ready' } : res;
       while (status.status !== 'ready') {
         if (status.status === 'error') throw new Error(status.message || 'Ошибка разбора');
         setBar(0.5 + 0.5 * (status.progress || 0));
@@ -161,6 +164,23 @@ class App {
     }
   }
 
+  /** Static version: parse in a worker, keep the result in IndexedDB. */
+  async _parseLocal(file, setBar, text) {
+    const id = demoIdFor(file);
+    text.textContent = `Разбор ${file.name}…`;
+    const { meta, frames } = await parseFile(file, {
+      onProgress: (f, m) => { setBar(f); text.textContent = `Разбор демо (в браузере): ${m}`; },
+    });
+    meta.id = id;
+    text.textContent = 'Сохранение…';
+    try {
+      await library.put(meta, frames);
+    } catch (err) {
+      throw new Error(`Не удалось сохранить разобранное демо в браузере (${err.message || err}). Освободите место и попробуйте снова.`);
+    }
+    return { id, status: 'ready' };
+  }
+
   // -- UI wiring ----------------------------------------------------------------------
 
   _bindUi() {
@@ -173,7 +193,8 @@ class App {
       if (del) {
         e.stopPropagation();
         if (!confirm('Удалить демо и его разобранные данные? Записанные клипы останутся.')) return;
-        await fetch(`/api/demos/${del.dataset.del}`, { method: 'DELETE' });
+        if (STATIC) await library.remove(del.dataset.del);
+        else await fetch(`/api/demos/${del.dataset.del}`, { method: 'DELETE' });
         return this.showLibrary();
       }
       const card = e.target.closest('[data-id]');
@@ -182,6 +203,13 @@ class App {
         else { $('library').classList.add('hidden'); this.open(card.dataset.id); }
       }
     });
+    if (STATIC) {
+      document.body.classList.add('static');
+      // Android pickers grey out unknown extensions like .dem: accept anything.
+      for (const input of [$('file-input'), $('file-input-2')]) input.removeAttribute('accept');
+      $('btn-open-label').firstChild.textContent = 'Открыть .dem';
+      $('dz-note').textContent = 'Демо разбирается прямо в браузере: файл никуда не загружается и остаётся на этом устройстве.';
+    }
     for (const input of [$('file-input'), $('file-input-2')]) {
       input.addEventListener('change', () => { this.upload(input.files[0]); input.value = ''; });
     }

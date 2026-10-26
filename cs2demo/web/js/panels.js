@@ -1,4 +1,5 @@
 // Sidebar tabs: players, highlights (+ clip recording), clips library, view settings.
+import { STATIC, library } from './backend.js';
 import { esc, fmtBytes, fmtMoney, fmtTime, fetchJSON, iconSvg, toast, weaponIcon } from './util.js';
 import { ICONS } from './icons.js';
 import {
@@ -141,7 +142,7 @@ export class HighlightsPanel {
           <input type="checkbox" data-opt="auto" ${o.auto ? 'checked' : ''}> Автозапись 5 лучших после загрузки демо</label>
         <div class="btn-row">
           <button class="btn primary" data-act="record">● Записать выбранные</button>
-          <button class="btn" data-act="server" title="Покадровый рендер в MP4 на сервере (headless Chromium)">Рендер на сервере</button>
+          ${STATIC ? '' : '<button class="btn" data-act="server" title="Покадровый рендер в MP4 на сервере (headless Chromium)">Рендер на сервере</button>'}
         </div>
         <div class="status-line" id="rec-status"></div>
       </div>
@@ -300,7 +301,12 @@ export class HighlightsPanel {
           ? await exportMp4(director, { onProgress, signal: this.abort.signal })
           : await exportRealtime(director, { onProgress, signal: this.abort.signal });
         try {
-          await uploadClip(this.demo.meta.id, director, blob);
+          if (STATIC) {
+            const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
+            await library.putClip(this.demo.meta.id, `${director.fileName}.${ext}`, director.info, blob);
+          } else {
+            await uploadClip(this.demo.meta.id, director, blob);
+          }
           saved++;
         } catch (err) {
           downloadBlob(blob, `${director.fileName}.${blob.type.includes('mp4') ? 'mp4' : 'webm'}`);
@@ -392,9 +398,11 @@ export class ClipsPanel {
       if (btn.dataset.act === 'delete') {
         const { demo, file } = btn.dataset;
         if (!confirm(`Удалить клип ${file}?`)) return;
-        await fetch(`/api/clips/${demo}/${encodeURIComponent(file)}`, { method: 'DELETE' });
+        if (STATIC) await library.removeClip(`${demo}/${file}`);
+        else await fetch(`/api/clips/${demo}/${encodeURIComponent(file)}`, { method: 'DELETE' });
         this.refresh();
       }
+      if (btn.dataset.act === 'share') this.share(btn.dataset.key);
     });
   }
 
@@ -402,7 +410,7 @@ export class ClipsPanel {
     const demoId = this.app.viewer.demo?.meta.id;
     let clips = [];
     try {
-      clips = await fetchJSON(`/api/clips${!this.all && demoId ? `?demo=${demoId}` : ''}`);
+      clips = STATIC ? await this._localClips(demoId) : await fetchJSON(`/api/clips${!this.all && demoId ? `?demo=${demoId}` : ''}`);
     } catch (err) {
       this.el.innerHTML = `<p class="muted">Не удалось получить список клипов: ${esc(err.message)}</p>`;
       return;
@@ -411,7 +419,7 @@ export class ClipsPanel {
     const head = `<div class="btn-row" style="margin:0 0 10px">
       <button class="btn small" data-act="refresh">Обновить</button>
       <button class="btn small" data-act="toggle-all">${this.all ? 'Только это демо' : 'Клипы всех демо'}</button>
-      <button class="btn small primary" data-act="montage" title="Отметьте клипы в нужном порядке">Склеить в нарезку</button></div>
+      ${STATIC ? '' : '<button class="btn small primary" data-act="montage" title="Отметьте клипы в нужном порядке">Склеить в нарезку</button>'}</div>
       <div class="status-line" id="montage-status"></div>`;
     if (!clips.length) {
       this.el.innerHTML = head + '<p class="muted">Клипов пока нет. Откройте «Хайлайты», отметьте моменты и нажмите «Записать».</p>';
@@ -421,12 +429,13 @@ export class ClipsPanel {
       <div class="clip">
         <video src="${esc(c.url)}" controls preload="metadata" playsinline></video>
         <div class="clip-body">
-          <label class="check title"><input type="checkbox" data-pick="${esc(c.demo)}/${esc(c.file)}"
-            ${this.picked.includes(`${c.demo}/${c.file}`) ? 'checked' : ''}> ${esc(c.title || c.file)}</label>
+          <label class="check title">${STATIC ? '' : `<input type="checkbox" data-pick="${esc(c.demo)}/${esc(c.file)}"
+            ${this.picked.includes(`${c.demo}/${c.file}`) ? 'checked' : ''}>`} ${esc(c.title || c.file)}</label>
           <div class="muted small">${esc([c.pov && POV_LABELS[c.pov], c.width && `${c.width}×${c.height}`, c.fps && `${c.fps} fps`,
             c.duration && `${c.duration} с`, fmtBytes(c.size)].filter(Boolean).join(' · '))}</div>
           <div class="btn-row">
             <a class="btn small" href="${esc(c.url)}" download="${esc(c.file)}">Скачать</a>
+            ${STATIC && navigator.canShare ? `<button class="btn small" data-act="share" data-key="${esc(c.key)}">Поделиться</button>` : ''}
             <button class="btn small danger" data-act="delete" data-demo="${esc(c.demo)}" data-file="${esc(c.file)}">Удалить</button>
           </div>
         </div>
@@ -435,6 +444,32 @@ export class ClipsPanel {
 }
 
 Object.assign(ClipsPanel.prototype, {
+  /** Static version: clips recorded in this browser (IndexedDB). */
+  async _localClips(demoId) {
+    for (const u of this._urls || []) URL.revokeObjectURL(u);
+    this._urls = [];
+    const clips = await library.listClips(!this.all && demoId ? demoId : null);
+    this._blobs = new Map();
+    return clips.map((c) => {
+      const url = URL.createObjectURL(c.blob);
+      this._urls.push(url);
+      this._blobs.set(c.key, c);
+      return { ...c, url };
+    });
+  },
+
+  async share(key) {
+    const c = this._blobs?.get(key);
+    if (!c) return;
+    const file = new File([c.blob], c.file, { type: c.blob.type });
+    if (!navigator.canShare?.({ files: [file] })) { toast('Браузер не умеет делиться файлами — нажмите «Скачать»'); return; }
+    try {
+      await navigator.share({ files: [file], title: c.title || c.file });
+    } catch (err) {
+      if (err.name !== 'AbortError') toast(err.message, 'error');
+    }
+  },
+
   _pickLabel() {
     const st = this.el.querySelector('#montage-status');
     if (st) st.textContent = this.picked.length ? `В нарезке: ${this.picked.length} (в порядке отметки)` : '';

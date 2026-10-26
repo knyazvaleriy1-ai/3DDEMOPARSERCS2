@@ -13,8 +13,7 @@
     <div id="demo-title" class="demo-title"></div>
     <div class="spacer"></div>
     <button id="btn-library" class="btn">Демки</button>
-    <label class="btn primary" title="Загрузить демо CS2">
-      Загрузить .dem
+    <label class="btn primary" id="btn-open-label" title="Загрузить демо CS2">Загрузить .dem
       <input type="file" id="file-input" accept=".dem" hidden>
     </label>
   </header>
@@ -93,7 +92,7 @@
       <div id="dropzone" class="dropzone">
         <div class="dz-title">Перетащите сюда .dem файл CS2</div>
         <div class="dz-sub">или <label class="link">выберите файл<input type="file" id="file-input-2" accept=".dem" hidden></label>.
-          Демо разбирается на вашем компьютере, ничего никуда не отправляется.</div>
+          <span id="dz-note">Демо разбирается на вашем компьютере, ничего никуда не отправляется.</span></div>
         <div id="upload-progress" class="bar hidden"><div></div></div>
         <div id="upload-text" class="dz-sub"></div>
       </div>

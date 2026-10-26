@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | [three.js](https://threejs.org) r170 (core, OrbitControls, GLTFLoader, SkeletonUtils, BufferGeometryUtils) | `cs2demo/web/vendor/` | MIT, `three.LICENSE` |
 | [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) 5.2.1 | `cs2demo/web/vendor/mp4-muxer.mjs` | MIT, `mp4-muxer.LICENSE` |
+| [demoparser2](https://github.com/LaihoE/demoparser) v0.42.1 parser compiled to WebAssembly by `wasm/build.sh` (with its Rust dependencies — prost, bitter, ahash, snap and others, MIT/Apache-2.0) and the [wasm-bindgen](https://github.com/rustwasm/wasm-bindgen) 0.2.100 JS glue | `cs2demo/web/vendor/demoparser/` | MIT, `demoparser.LICENSE`; wasm-bindgen MIT/Apache-2.0 |
 | Killfeed icons from [game-icons.net](https://game-icons.net), rotated and cropped by `scripts/build_icons.py` | `cs2demo/web/js/icons.js` | [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) |
 
 Icon authors (game-icons.net): **Skoll** — ak47, ak47u, fn-fal, famas, steyr-aug,
@@ -18,6 +19,9 @@ grenade; **DarkZaitzev** — smoke-bomb. Modified (rotated, cropped, scopes adde
 to the rifle icons).
 
 ## Скачивается при запуске / Downloaded at runtime (not in the repository)
+
+The web version (GitHub Pages) downloads these at build time and serves them
+next to the page.
 
 | Что | Откуда | Чьё |
 | --- | --- | --- |
