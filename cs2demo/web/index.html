@@ -14,7 +14,7 @@
     <div class="spacer"></div>
     <button id="btn-library" class="btn">Демки</button>
     <label class="btn primary" id="btn-open-label" title="Демо CS2: .dem или архив .rar (HLTV)">Загрузить демо
-      <input type="file" id="file-input" accept=".dem,.rar" hidden>
+      <input type="file" id="file-input" accept=".dem,.rar,.zst,.gz" hidden>
     </label>
   </header>
 
@@ -95,13 +95,19 @@
         <button id="library-close" class="btn icon" title="Закрыть">✕</button>
       </div>
       <div id="dropzone" class="dropzone">
-        <div class="dz-title">Перетащите сюда демо CS2: .dem или архив .rar</div>
-        <div class="dz-sub">или <label class="link">выберите файл<input type="file" id="file-input-2" accept=".dem,.rar" hidden></label>.
-          Архивы с HLTV распаковываются сами.
+        <div class="dz-title">Перетащите сюда демо CS2: .dem, архив .rar (HLTV) или .dem.zst (FACEIT)</div>
+        <div class="dz-sub">или <label class="link">выберите файл<input type="file" id="file-input-2" accept=".dem,.rar,.zst,.gz" hidden></label>.
+          Архивы распаковываются сами.
           <span id="dz-note">Демо разбирается на вашем компьютере, ничего никуда не отправляется.</span></div>
         <div id="upload-progress" class="bar hidden"><div></div></div>
         <div id="upload-text" class="dz-sub"></div>
       </div>
+      <form id="faceit-form" class="faceit-form">
+        <input id="faceit-link" type="text" inputmode="url" autocomplete="off"
+          placeholder="Ссылка на матч FACEIT: faceit.com/…/cs2/room/1-…">
+        <button class="btn primary" type="submit">Скачать с FACEIT</button>
+      </form>
+      <p id="faceit-note" class="muted small faceit-note"></p>
       <div id="demo-list" class="demo-list"></div>
     </div>
   </div>

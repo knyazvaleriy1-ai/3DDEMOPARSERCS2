@@ -26,7 +26,10 @@ def _resolve_demo(arg: str, step: int | None = None) -> str:
         return demo_id
     if storage.is_valid_id(arg) and is_parsed(arg):
         return arg
-    raise SystemExit(f"Не найдено демо: {arg} (укажите путь к .dem или .rar, или id из `cs2demo list`)")
+    raise SystemExit(
+        f"Не найдено демо: {arg} (укажите путь к .dem / .rar / .dem.zst, ссылку на матч FACEIT "
+        "или id из `cs2demo list`)"
+    )
 
 
 def _ensure_parsed(demo_id: str, dem: Path, name: str, step: int | None) -> None:
@@ -40,10 +43,14 @@ def _ensure_parsed(demo_id: str, dem: Path, name: str, step: int | None) -> None
 
 
 def _resolve_demos(arg: str, step: int | None = None) -> list[str]:
-    """Like _resolve_demo, but a .rar (HLTV: one demo per map) gives every demo inside."""
-    from .jobs import import_demo
+    """Like _resolve_demo, but a .rar (HLTV: one demo per map) gives every demo
+    inside, a .dem.zst (FACEIT) is unpacked, and a FACEIT match link is downloaded."""
+    from . import faceit
+    from .jobs import import_demo, is_parsed
 
     path = Path(arg).expanduser()
+    if not path.exists() and faceit.match_id(arg) and not (storage.is_valid_id(arg) and is_parsed(arg)):
+        return _faceit_demos(arg, step)
     if not (path.is_file() and is_archive(path)):
         return [_resolve_demo(arg, step)]
     print(f"Распаковка {path.name}…")
@@ -54,6 +61,24 @@ def _resolve_demos(arg: str, step: int | None = None) -> list[str]:
             demos = extract_demos(path, Path(tmp))
         except ArchiveError as exc:
             raise SystemExit(str(exc)) from exc
+        for dem in demos:
+            demo_id, stored = import_demo(dem, display_name=dem.stem, move=True)
+            _ensure_parsed(demo_id, stored, dem.name, step)
+            ids.append(demo_id)
+    return ids
+
+
+def _faceit_demos(link: str, step: int | None) -> list[str]:
+    from . import faceit
+    from .jobs import import_demo
+
+    ids = []
+    with tempfile.TemporaryDirectory(dir=storage.demos_dir()) as tmp:
+        try:
+            info, demos = faceit.download(link, Path(tmp), progress=_progress)
+        except faceit.FaceitError as exc:
+            raise SystemExit(f"\n{exc}") from exc
+        print(f"\nFACEIT: {info['title']} {info['map']}")
         for dem in demos:
             demo_id, stored = import_demo(dem, display_name=dem.stem, move=True)
             _ensure_parsed(demo_id, stored, dem.name, step)
@@ -183,7 +208,8 @@ def cmd_watch(args: argparse.Namespace) -> None:
     sizes: dict[str, int] = {}
     print(f"Слежу за {folder} (Ctrl+C — выход)")
     while True:
-        for dem in sorted([*folder.glob("**/*.dem"), *folder.glob("**/*.rar")]):
+        patterns = ("**/*.dem", "**/*.rar", "**/*.zst", "**/*.dem.gz")
+        for dem in sorted(p for pattern in patterns for p in folder.glob(pattern)):
             key = str(dem.resolve())
             try:
                 stat = dem.stat()
@@ -305,7 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--open", action="store_true", help="открыть браузер")
     p.set_defaults(func=cmd_serve)
 
-    p = sub.add_parser("parse", help="разобрать .dem файлы или архивы .rar (HLTV)")
+    p = sub.add_parser("parse", help="разобрать .dem, архивы .rar (HLTV), .dem.zst или ссылки на матчи FACEIT")
     p.add_argument("files", nargs="+")
     p.add_argument("--step", type=int, default=None, help="шаг выборки в тиках (по умолчанию 2)")
     p.add_argument("--force", action="store_true", help="разобрать заново")
@@ -315,7 +341,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_list)
 
     p = sub.add_parser("highlights", help="показать найденные хайлайты")
-    p.add_argument("demo", help="id демо или путь к .dem / .rar")
+    p.add_argument("demo", help="id демо, путь к .dem / .rar / .dem.zst или ссылка на матч FACEIT")
     p.add_argument("--json", action="store_true")
     p.add_argument("--top", type=int)
     p.add_argument("--min-score", type=float)
@@ -327,13 +353,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_highlights)
 
     p = sub.add_parser("render", help="записать клипы хайлайтов в MP4 (headless Chromium)")
-    p.add_argument("demo", help="id демо или путь к .dem / .rar")
+    p.add_argument("demo", help="id демо, путь к .dem / .rar / .dem.zst или ссылка на матч FACEIT")
     p.add_argument("--clips", help="id хайлайтов через запятую")
     _add_render_args(p)
     p.set_defaults(func=cmd_render)
 
     p = sub.add_parser("pov", help="POV игрока по раундам в один MP4: после смерти раунд ускоряется")
-    p.add_argument("demo", help="id демо или путь к .dem / .rar")
+    p.add_argument("demo", help="id демо, путь к .dem / .rar / .dem.zst или ссылка на матч FACEIT")
     p.add_argument("--player", required=True, help="ник игрока (или его часть)")
     p.add_argument("--rounds", help="раунды: 1-12 или 3,5,7-9 (по умолчанию все)")
     p.add_argument("--ff", type=int, choices=[0, 4, 8, 16], default=8,
@@ -349,7 +375,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_watch, top=5)
 
     p = sub.add_parser("montage", help="нарезка лучших моментов одного или нескольких демо в одно видео")
-    p.add_argument("demos", nargs="+", help="id демо или пути к .dem / .rar")
+    p.add_argument("demos", nargs="+", help="id демо, пути к .dem / .rar / .dem.zst или ссылки на матчи FACEIT")
     p.add_argument("--include", help="обязательно включить: подстроки id через запятую, например clutch1v5")
     p.add_argument("--per-demo", type=int, help="не больше N моментов из одного демо")
     p.add_argument("--title", default="CS2 хайлайты", help="заголовок титульной карточки")

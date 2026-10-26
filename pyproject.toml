@@ -17,6 +17,7 @@ dependencies = [
     "uvicorn>=0.27",
     "python-multipart>=0.0.9",
     "imageio-ffmpeg>=0.5",
+    "zstandard>=0.22",  # FACEIT demos (.dem.zst)
 ]
 
 [project.optional-dependencies]
@@ -33,6 +34,7 @@ packages = ["cs2demo"]
 cs2demo = [
     "web/*.html", "web/css/*", "web/js/*", "web/js/parse/*", "web/vendor/*", "web/vendor/demoparser/*",
     "web/vendor/unrar/*", "web/vendor/mediabunny/*", "web/vendor/opus/*",
+    "web/vendor/fzstd/*",
     "unrar_cli.mjs",
 ]
 

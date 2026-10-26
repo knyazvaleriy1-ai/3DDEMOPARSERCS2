@@ -2,16 +2,26 @@
 per map. Unpacked with whatever is on the system: ``unrar``, 7-Zip, ``bsdtar``
 (the ``tar`` of Windows 10+ and macOS reads RAR), ``unar``, or, failing those,
 Node.js with the WebAssembly UnRAR of the web version (``unrar_cli.mjs``).
+
+FACEIT serves one compressed demo, ``.dem.zst`` (Zstandard; older ones
+``.dem.gz``): decompressed with ``compression.zstd`` (Python 3.14+), the
+``zstandard`` package, or the ``zstd`` command.
 """
 
 from __future__ import annotations
 
+import gzip
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
-ARCHIVE_SUFFIXES = (".rar",)
+# A single compressed .dem (FACEIT)
+COMPRESSED_SUFFIXES = (".zst", ".gz")
+ARCHIVE_SUFFIXES = (".rar", *COMPRESSED_SUFFIXES)
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+GZIP_MAGIC = b"\x1f\x8b"
+DEMO_MAGIC = b"PBDEMS2"
 
 _NODE_SCRIPT = Path(__file__).with_name("unrar_cli.mjs")
 
@@ -22,6 +32,74 @@ class ArchiveError(RuntimeError):
 
 def is_archive(path: Path) -> bool:
     return path.suffix.lower() in ARCHIVE_SUFFIXES
+
+
+def is_compressed(path: Path) -> bool:
+    return path.suffix.lower() in COMPRESSED_SUFFIXES
+
+
+def demo_name(name: str) -> str:
+    """'match.dem.zst' / 'match.zst' -> 'match.dem'."""
+    base = Path(name).name
+    for suffix in COMPRESSED_SUFFIXES:
+        if base.lower().endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return base if base.lower().endswith(".dem") else f"{base}.dem"
+
+
+def _copy_zstd(src, out) -> None:
+    try:
+        from compression import zstd  # Python 3.14+
+
+        with zstd.ZstdFile(src) as fh:
+            shutil.copyfileobj(fh, out, 1 << 20)
+        return
+    except ImportError:
+        pass
+    try:
+        import zstandard
+
+        zstandard.ZstdDecompressor().copy_stream(src, out, read_size=1 << 20, write_size=1 << 20)
+        return
+    except ImportError:
+        pass
+    exe = shutil.which("zstd") or shutil.which("unzstd")
+    if not exe:
+        raise ArchiveError("Для .zst нужен пакет zstandard (pip install zstandard) или программа zstd")
+    out.flush()
+    proc = subprocess.run([exe, "-d", "-c", "-q"], stdin=src, stdout=out, stderr=subprocess.PIPE, check=False)
+    if proc.returncode != 0:
+        raise ArchiveError(f"zstd: {proc.stderr.decode(errors='replace').strip() or proc.returncode}")
+
+
+def decompress_demo(src: Path, dest: Path) -> Path:
+    """Unpack a compressed demo (FACEIT .dem.zst / .dem.gz) into ``dest``."""
+    dest.mkdir(parents=True, exist_ok=True)
+    out_path = dest / demo_name(src.name)
+    with src.open("rb") as fh:
+        magic = fh.read(4)
+        fh.seek(0)
+        try:
+            with out_path.open("wb") as out:
+                if magic.startswith(ZSTD_MAGIC):
+                    _copy_zstd(fh, out)
+                elif magic.startswith(GZIP_MAGIC):
+                    with gzip.GzipFile(fileobj=fh) as gz:
+                        shutil.copyfileobj(gz, out, 1 << 20)
+                else:
+                    raise ArchiveError(f"{src.name}: это не архив .zst / .gz")
+        except ArchiveError:
+            out_path.unlink(missing_ok=True)
+            raise
+        except Exception as exc:  # noqa: BLE001 - corrupt or truncated file
+            out_path.unlink(missing_ok=True)
+            raise ArchiveError(f"Не удалось распаковать {src.name}: {exc}") from exc
+    with out_path.open("rb") as fh:
+        if fh.read(len(DEMO_MAGIC)) != DEMO_MAGIC:
+            out_path.unlink(missing_ok=True)
+            raise ArchiveError(f"В {src.name} не демо CS2")
+    return out_path
 
 
 def _is_bsdtar(exe: str) -> bool:
@@ -58,6 +136,8 @@ def extract_command(archive: Path, dest: Path) -> list[str] | None:
 
 def extract_demos(archive: Path, dest: Path) -> list[Path]:
     """Unpack the ``.dem`` files of ``archive`` into ``dest`` (sorted paths)."""
+    if is_compressed(archive):
+        return [decompress_demo(archive, dest)]
     dest.mkdir(parents=True, exist_ok=True)
     cmd = extract_command(archive, dest)
     if cmd is None:

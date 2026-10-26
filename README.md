@@ -23,6 +23,9 @@
   играл на телефонах и в мессенджерах).
 - **Войс игроков** из демо (FACEIT, ESEA, свои демки): все / команда игрока /
   только он / T / CT, значок микрофона у говорящих; войс пишется и в клипы.
+- **Демки FACEIT по ссылке на матч**: вставьте ссылку — демо скачается,
+  распакуется и откроется (нужен ключ FACEIT API, см. [«Демки FACEIT»](#демки-faceit));
+  скачанные вручную `.dem.zst` открываются как есть.
 - **POV игрока**: вид от первого лица по целым раундам — пока игрок жив, обычная
   скорость, после смерти остаток раунда **ускоряется** (×4/×8/×16) с видом от
   живого тиммейта, закупка пропускается. Можно смотреть (кнопка ⏩) и **записать
@@ -50,7 +53,8 @@
 **https://knyazvaleriy1-ai.github.io/3DDEMOPARSERCS2/** (GitHub Pages) или свой
 адрес на Vercel — как опубликовать, см. [«Публикация сайта»](#публикация-сайта).
 
-Откройте ссылку, нажмите «Открыть демо» и выберите `.dem` или архив `.rar` с HLTV. Ничего не
+Откройте ссылку, нажмите «Открыть демо» и выберите `.dem`, архив `.rar` с HLTV или
+`.dem.zst` с FACEIT (или вставьте ссылку на матч FACEIT). Ничего не
 загружается на сервер: демо разбирает прямо в браузере тот же парсер
 (demoparser2, скомпилированный в WebAssembly), а логика сборки данных — точная
 копия Python-парсера (вывод совпадает байт в байт). Разобранные демо и записанные
@@ -68,7 +72,9 @@
   памяти нужно столько же, сколько для обычной `.dem`. Архивы с паролем и
   многотомные (`.part1.rar`…) не поддерживаются.
 - Чего нет в веб-версии: рендера на сервере, папки-наблюдателя и склейки нарезки —
-  для этого нужна обычная (Python) версия.
+  для этого нужна обычная (Python) версия. Скачивание с FACEIT по ссылке работает
+  в версии на Vercel (функция `api/faceit.js`), на GitHub Pages — только открытие
+  скачанного файла.
 
 ### Публикация сайта
 
@@ -83,6 +89,10 @@
 Vercel скачивает карты из awpy-data и модель игрока (~1 минута). Дальше каждый
 пуш в `master` публикуется автоматически, а для каждого pull request Vercel
 делает отдельную preview-ссылку.
+
+Чтобы на сайте работали ссылки на матчи FACEIT, добавьте ключ: **Settings →
+Environment Variables → `FACEIT_API_KEY`** (и `FACEIT_DOWNLOADS_TOKEN`, если FACEIT
+выдал отдельный токен), затем **Redeploy**. Подробнее — [«Демки FACEIT»](#демки-faceit).
 
 Если сборка падает с «No entrypoint found» (или «No FastAPI entrypoint
 found»), значит, в собираемой ветке нет `vercel.json`: без него Vercel
@@ -137,7 +147,34 @@ python -m venv .venv
   `…\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo\replays\`.
 - **HLTV:** архив `.rar` можно открывать как есть — он распакуется сам (в браузере
   или, в командной строке, системным unrar / 7-Zip / tar).
-- **FACEIT:** скачайте архив матча и распакуйте `.dem`.
+- **FACEIT:** вставьте ссылку на матч (см. ниже) или на странице матча нажмите
+  «Watch demo» и откройте скачанный `.dem.zst` как есть — распаковывать не нужно.
+
+### Демки FACEIT
+
+Ссылку на матч (`https://www.faceit.com/ru/cs2/room/1-…`) можно вставить в поле
+«Ссылка на матч FACEIT» в окне «Демки», просто нажать Ctrl+V в любом месте
+сайта, или открыть `…/?faceit=<ссылка>`. В окне есть закладка **«CS2 3D ▸»**:
+перетащите её на панель закладок и нажимайте прямо на странице матча FACEIT.
+Из командной строки ссылку принимают все команды:
+`python -m cs2demo parse https://www.faceit.com/…/room/1-…` (и `render`, `pov`, …).
+
+Демо скачивается через API FACEIT, поэтому нужен ключ:
+
+1. На [developers.faceit.com](https://developers.faceit.com) создайте приложение и
+   **server-side** API key → переменная `FACEIT_API_KEY` (для Vercel — в настройках
+   проекта, для своего сервера — в окружении перед `cs2demo serve`).
+2. FACEIT отдаёт демо только через свой **Downloads API**, доступ к нему выдаётся по
+   заявке (форма — в [документации FACEIT](https://docs.faceit.com/getting-started/Guides/download-api/),
+   рассматривают около 30 дней). Без него сайт покажет, что доступа нет, и
+   предложит скачать файл вручную. Если доступ выдали отдельным токеном —
+   `FACEIT_DOWNLOADS_TOKEN`.
+
+FACEIT хранит демо около 30 дней после матча. Ключ остаётся на сервере: браузер
+получает от функции `api/faceit` только временную ссылку на сам файл (а если
+хранилище FACEIT не разрешает читать его с чужого сайта — файл идёт через функцию).
+Учтите, что опубликованным сайтом с ключом сможет пользоваться любой, у кого есть
+ссылка на сайт.
 
 ## Управление
 
@@ -339,6 +376,8 @@ python -m cs2demo maps de_mirage de_inferno             # заранее ска�
 | `CS2DEMO_RENDER_GPU=0` | принудительно рендерить headless на процессоре (SwiftShader) |
 | `CS2DEMO_CHROMIUM` | путь к своему Chrome/Chromium для headless-рендера |
 | `CS2DEMO_MAPDATA_VERSION` | зафиксировать версию релиза awpy-data |
+| `FACEIT_API_KEY` | ключ FACEIT API для скачивания демо по ссылке на матч |
+| `FACEIT_DOWNLOADS_TOKEN` | токен Downloads API, если FACEIT выдал его отдельно от ключа |
 
 ## Как это устроено
 
@@ -351,7 +390,8 @@ cs2demo/
   recorder.py    headless-рендер клипов: Chromium (Playwright) → JPEG-кадры → ffmpeg → MP4
   montage.py     нарезка: выбор лучших моментов нескольких демо, рендер, склейка
   cli.py         команды serve / parse / list / highlights / render / pov / watch / maps
-  archives.py    .rar: распаковка системным unrar / 7-Zip / bsdtar / unar или Node.js (unrar_cli.mjs)
+  archives.py    .rar: распаковка системным unrar / 7-Zip / bsdtar / unar или Node.js (unrar_cli.mjs); .dem.zst / .dem.gz
+  faceit.py      демо по ссылке на матч FACEIT (Data API → Downloads API → .dem.zst)
   models.py      модель игрока: загрузка по умолчанию и пользовательские замены
   web/           просмотрщик (Three.js, без сборки)
     js/backend.js  откуда данные: сервер (/api) или браузер (IndexedDB, статические ассеты)
@@ -360,6 +400,8 @@ cs2demo/
     vendor/unrar/  UnRAR в WebAssembly (node-unrar-js)
     vendor/mediabunny/  запись MP4 и AAC-кодер (FFmpeg в WebAssembly) для клипов
     vendor/opus/   декодер Opus (libopus в WebAssembly) для войса
+    vendor/fzstd/  распаковка .dem.zst (FACEIT) в браузере
+    js/faceit.js   скачивание по ссылке FACEIT: через сервер или функцию Vercel
     js/viewer.js   сцена, камеры, воспроизведение
     js/map.js      меш карты, процедурная раскраска, тени, небо
     js/palettes.js палитры карт
@@ -376,6 +418,7 @@ cs2demo/
 scripts/build_icons.py  сборка icons.js из game-icons
 scripts/build_site.py   сборка веб-версии (GitHub Pages)
 wasm/                   Rust-обёртка demoparser2 для WebAssembly
+api/faceit.js           функция Vercel: ссылка на матч FACEIT → ссылка на демо (ключ API остаётся на сервере)
 ```
 
 `frames.bin` хранит состояние каждого игрока каждые 2 тика (32 Гц):

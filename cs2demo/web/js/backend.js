@@ -156,6 +156,13 @@ export const library = {
 
 export const isArchive = (name) => /\.rar$/i.test(name);
 export const isDemoFile = (name) => /\.dem$/i.test(name);
+/** One compressed demo: FACEIT serves .dem.zst (older ones .dem.gz). */
+export const isCompressed = (name) => /\.(zst|gz)$/i.test(name);
+/** 'match.dem.zst' -> 'match.dem' */
+export const demoName = (name) => {
+  const base = name.split(/[\\/]/).pop().replace(/\.(zst|gz)$/i, '');
+  return /\.dem$/i.test(base) ? base : `${base}.dem`;
+};
 const baseName = (name) => name.split(/[\\/]/).pop();
 
 /**
@@ -168,7 +175,7 @@ export function demoIdFor(file, entry = null) {
     h ^= ch.codePointAt(0);
     h = Math.imul(h, 0x01000193) >>> 0;
   }
-  const stem = baseName(entry ? entry.name : file.name).replace(/\.dem$/i, '');
+  const stem = demoName(baseName(entry ? entry.name : file.name)).replace(/\.dem$/i, '');
   const slug = stem.normalize('NFKD').replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 40) || 'demo';
   return `${slug}-${h.toString(16).padStart(8, '0')}`;
 }
@@ -189,7 +196,7 @@ function runWorker(msg, onProgress) {
   });
 }
 
-/** Parse a .dem File (or the demo ``entry`` of a .rar) in a worker. Resolves to {meta, frames}. */
+/** Parse a .dem / .dem.zst File (or the demo ``entry`` of a .rar) in a worker. Resolves to {meta, frames}. */
 export async function parseFile(file, { step = 2, entry = null, onProgress } = {}) {
   const m = await runWorker({ op: 'parse', file, entry, step }, onProgress);
   return { meta: m.meta, frames: m.frames };

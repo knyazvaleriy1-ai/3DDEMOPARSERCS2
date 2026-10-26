@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
@@ -16,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, maps, media, models, storage
+from . import __version__, archives, faceit, maps, media, models, storage
 from .highlights import DEFAULTS as HIGHLIGHT_DEFAULTS
 from .highlights import detect_highlights
 from .jobs import JobRegistry, import_demo, is_parsed
@@ -85,6 +86,10 @@ class RenderRequest(BaseModel):
     keys: bool = False
     voice: str = "team"
     quality: str = "auto"
+
+
+class FaceitRequest(BaseModel):
+    url: str
 
 
 class PovRequest(BaseModel):
@@ -177,18 +182,24 @@ def create_app() -> FastAPI:
     @app.post("/api/demos")
     async def upload_demo(file: UploadFile = File(...)) -> dict[str, Any]:
         name = Path(file.filename or "demo.dem").name
-        if not name.lower().endswith(".dem"):
-            raise HTTPException(400, "Нужен файл .dem")
+        packed = archives.is_compressed(Path(name))
+        if not (name.lower().endswith(".dem") or packed):
+            raise HTTPException(400, "Нужен файл .dem или .dem.zst (FACEIT)")
         tmpdir = Path(tempfile.mkdtemp(dir=storage.demos_dir()))
         try:
-            tmp = tmpdir / "upload.dem"
+            tmp = tmpdir / ("upload" + "".join(Path(name).suffixes[-2:]) if packed else "upload.dem")
             with tmp.open("wb") as out:
                 shutil.copyfileobj(file.file, out, 1 << 20)
+            if packed:
+                try:
+                    tmp = await asyncio.to_thread(archives.decompress_demo, tmp, tmpdir / "out")
+                except archives.ArchiveError as exc:
+                    raise HTTPException(400, str(exc)) from exc
             with tmp.open("rb") as fh:
                 magic = fh.read(8)
             if not magic.startswith(b"PBDEMS2"):
                 raise HTTPException(400, "Это не демо CS2 (ожидается сигнатура PBDEMS2)")
-            demo_id, dem_path = import_demo(tmp, Path(name).stem, move=True)
+            demo_id, dem_path = import_demo(tmp, Path(archives.demo_name(name)).stem, move=True)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
         if is_parsed(demo_id):
@@ -196,6 +207,42 @@ def create_app() -> FastAPI:
         jobs.submit_parse(demo_id, dem_path)
         jobs.update(demo_id, file=name)
         return {"id": demo_id, "status": "queued"}
+
+    @app.get("/api/faceit")
+    def faceit_status() -> dict[str, Any]:
+        """Whether matches can be downloaded by FACEIT link (a key is set)."""
+        return {"configured": faceit.configured()}
+
+    @app.post("/api/faceit")
+    def faceit_download(req: FaceitRequest) -> dict[str, Any]:
+        """Download and parse the demo of a FACEIT match (link or id) in the background:
+        poll /api/jobs/{job}; its result has the demo ids."""
+        mid = faceit.match_id(req.url)
+        if not mid:
+            raise HTTPException(400, "Не похоже на ссылку на матч FACEIT")
+        if not faceit.configured():
+            raise HTTPException(501, "На сервере не задан ключ FACEIT API (переменная FACEIT_API_KEY)")
+        key = f"faceit-{mid}"
+        current = jobs.get(key)
+        if current and current.get("status") in ("queued", "downloading"):
+            return {"job": key}
+        jobs.submit_download(key, _faceit_import, req.url)
+        return {"job": key}
+
+    def _faceit_import(link: str, progress) -> dict[str, Any]:
+        tmpdir = Path(tempfile.mkdtemp(dir=storage.demos_dir()))
+        try:
+            info, demos = faceit.download(link, tmpdir, progress=progress)
+            ids = []
+            for dem in demos:
+                demo_id, dem_path = import_demo(dem, dem.stem, move=True)
+                if not is_parsed(demo_id):
+                    jobs.submit_parse(demo_id, dem_path)
+                    jobs.update(demo_id, file=dem.name)
+                ids.append(demo_id)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        return {"match": info, "ids": ids}
 
     @app.get("/api/demos/{demo_id}")
     def demo_status(demo_id: str) -> dict[str, Any]:
