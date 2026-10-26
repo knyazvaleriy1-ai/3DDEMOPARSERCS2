@@ -105,6 +105,14 @@ export const library = {
     return tx(['demos'], 'readonly', (t) => reqP(t.objectStore('demos').get(id)));
   },
 
+  async has(id) {
+    try {
+      return !!(await tx(['summaries'], 'readonly', (t) => reqP(t.objectStore('summaries').getKey(id))));
+    } catch (_) {
+      return false;
+    }
+  },
+
   async put(meta, frames) {
     await tx(['summaries', 'demos'], 'readwrite', (t) => {
       t.objectStore('demos').put({ meta, frames }, meta.id);
@@ -141,30 +149,55 @@ export const library = {
 
 // -- parsing in the browser -----------------------------------------------------------------
 
-/** Stable id from the file's name, size and date (re-opening the same file reuses it). */
-export function demoIdFor(file) {
+export const isArchive = (name) => /\.rar$/i.test(name);
+export const isDemoFile = (name) => /\.dem$/i.test(name);
+const baseName = (name) => name.split(/[\\/]/).pop();
+
+/**
+ * Stable id from the file's name, size and date (re-opening the same file
+ * reuses it); ``entry`` = the demo inside an archive.
+ */
+export function demoIdFor(file, entry = null) {
   let h = 0x811c9dc5;
-  for (const ch of `${file.name}|${file.size}|${file.lastModified}`) {
+  for (const ch of `${file.name}|${file.size}|${file.lastModified}${entry ? `|${entry.name}` : ''}`) {
     h ^= ch.codePointAt(0);
     h = Math.imul(h, 0x01000193) >>> 0;
   }
-  const stem = file.name.replace(/\.dem$/i, '');
+  const stem = baseName(entry ? entry.name : file.name).replace(/\.dem$/i, '');
   const slug = stem.normalize('NFKD').replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 40) || 'demo';
   return `${slug}-${h.toString(16).padStart(8, '0')}`;
 }
 
-/** Parse a .dem File in a worker. Resolves to {meta, frames}. */
-export function parseFile(file, { step = 2, onProgress } = {}) {
+/** Run one job in a fresh parse worker (its memory is freed with it). */
+function runWorker(msg, onProgress) {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL('./parse/worker.js', import.meta.url), { type: 'module' });
     const done = (fn, value) => { worker.terminate(); fn(value); };
     worker.onmessage = (e) => {
-      const msg = e.data;
-      if (msg.type === 'progress') onProgress?.(msg.fraction, msg.message);
-      else if (msg.type === 'done') done(resolve, { meta: msg.meta, frames: msg.frames });
-      else if (msg.type === 'error') done(reject, new Error(msg.message));
+      const m = e.data;
+      if (m.type === 'progress') onProgress?.(m.fraction, m.message);
+      else if (m.type === 'error') done(reject, new Error(m.message));
+      else done(resolve, m);
     };
     worker.onerror = (e) => done(reject, new Error(e.message || 'ошибка парсера'));
-    worker.postMessage({ file, step });
+    worker.postMessage(msg);
   });
+}
+
+/** Parse a .dem File (or the demo ``entry`` of a .rar) in a worker. Resolves to {meta, frames}. */
+export async function parseFile(file, { step = 2, entry = null, onProgress } = {}) {
+  const m = await runWorker({ op: 'parse', file, entry, step }, onProgress);
+  return { meta: m.meta, frames: m.frames };
+}
+
+/** Demos in a .rar: [{name, size}] (only .dem files). */
+export async function listArchive(file) {
+  const m = await runWorker({ op: 'list', file });
+  return m.entries.filter((e) => isDemoFile(e.name) && !e.encrypted);
+}
+
+/** Unpack the demo ``entry`` of a .rar to a File. */
+export async function extractEntry(file, entry, onProgress) {
+  const m = await runWorker({ op: 'extract', file, entry }, onProgress);
+  return new File([m.blob], baseName(entry.name), { lastModified: file.lastModified });
 }

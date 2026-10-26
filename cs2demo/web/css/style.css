@@ -162,6 +162,11 @@ input[type=checkbox] { accent-color: var(--accent); }
 .demo-card .dscore { font-weight: 700; font-size: 16px; text-align: right; }
 .demo-card .dmeta { color: var(--muted); font-size: 12px; }
 .demo-card .dactions { display: flex; gap: 6px; justify-content: flex-end; }
+.picker-card { width: 520px; }
+.picker-body { padding: 12px 16px 16px; overflow-y: auto; }
+.picker-list { display: grid; gap: 4px; margin: 6px 0 4px; }
+.picker-list .check { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-2); }
+.picker-list .check span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .toast { position: fixed; left: 50%; bottom: 110px; transform: translateX(-50%); background: #22262e; border: 1px solid var(--line); padding: 10px 16px; border-radius: 8px; z-index: 30; max-width: 80vw; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
 .toast.error { border-color: #6b2a2c; color: #ffb3b5; }

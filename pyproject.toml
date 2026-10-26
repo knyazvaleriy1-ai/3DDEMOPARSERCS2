@@ -30,7 +30,10 @@ cs2demo = "cs2demo.cli:main"
 packages = ["cs2demo"]
 
 [tool.setuptools.package-data]
-cs2demo = ["web/*.html", "web/css/*", "web/js/*", "web/vendor/*"]
+cs2demo = [
+    "web/*.html", "web/css/*", "web/js/*", "web/js/parse/*", "web/vendor/*", "web/vendor/demoparser/*",
+    "web/vendor/unrar/*", "unrar_cli.mjs",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
