@@ -6,11 +6,13 @@ import argparse
 import json
 import logging
 import sys
+import tempfile
 import time
 import webbrowser
 from pathlib import Path
 
 from . import __version__, storage
+from .archives import ArchiveError, extract_demos, is_archive
 
 
 def _resolve_demo(arg: str, step: int | None = None) -> str:
@@ -20,15 +22,43 @@ def _resolve_demo(arg: str, step: int | None = None) -> str:
     path = Path(arg).expanduser()
     if path.is_file():
         demo_id, dem = import_demo(path)
-        if not is_parsed(demo_id):
-            print(f"Разбор {path.name} → {demo_id}")
-            started = time.time()
-            parse_and_store(demo_id, dem, step=step, progress=_progress)
-            print(f"\nГотово за {time.time() - started:.1f} с")
+        _ensure_parsed(demo_id, dem, path.name, step)
         return demo_id
     if storage.is_valid_id(arg) and is_parsed(arg):
         return arg
-    raise SystemExit(f"Не найдено демо: {arg} (укажите путь к .dem или id из `cs2demo list`)")
+    raise SystemExit(f"Не найдено демо: {arg} (укажите путь к .dem или .rar, или id из `cs2demo list`)")
+
+
+def _ensure_parsed(demo_id: str, dem: Path, name: str, step: int | None) -> None:
+    from .jobs import is_parsed, parse_and_store
+
+    if not is_parsed(demo_id):
+        print(f"Разбор {name} → {demo_id}")
+        started = time.time()
+        parse_and_store(demo_id, dem, step=step, progress=_progress)
+        print(f"\nГотово за {time.time() - started:.1f} с")
+
+
+def _resolve_demos(arg: str, step: int | None = None) -> list[str]:
+    """Like _resolve_demo, but a .rar (HLTV: one demo per map) gives every demo inside."""
+    from .jobs import import_demo
+
+    path = Path(arg).expanduser()
+    if not (path.is_file() and is_archive(path)):
+        return [_resolve_demo(arg, step)]
+    print(f"Распаковка {path.name}…")
+    ids = []
+    # Unpack next to the stored demos so they are moved, not copied, into place.
+    with tempfile.TemporaryDirectory(dir=storage.demos_dir()) as tmp:
+        try:
+            demos = extract_demos(path, Path(tmp))
+        except ArchiveError as exc:
+            raise SystemExit(str(exc)) from exc
+        for dem in demos:
+            demo_id, stored = import_demo(dem, display_name=dem.stem, move=True)
+            _ensure_parsed(demo_id, stored, dem.name, step)
+            ids.append(demo_id)
+    return ids
 
 
 def _progress(fraction: float, message: str) -> None:
@@ -60,8 +90,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
 def cmd_parse(args: argparse.Namespace) -> None:
     from .parser import load_meta
 
-    for f in args.files:
-        demo_id = _resolve_demo(f, step=args.step)
+    for demo_id in (i for f in args.files for i in _resolve_demos(f, step=args.step)):
         if args.force:
             from .jobs import parse_and_store
 
@@ -92,15 +121,18 @@ def cmd_highlights(args: argparse.Namespace) -> None:
     from .parser import load_meta
     from .recorder import pick_highlights
 
-    demo_id = _resolve_demo(args.demo)
-    meta = load_meta(storage.parsed_dir(demo_id))
-    opts = {k: getattr(args, k) for k in ("pre", "post", "max_gap", "max_clip") if getattr(args, k) is not None}
-    if opts or args.min_score is not None:
-        meta["highlights"] = detect_highlights(meta, min_score=args.min_score, **opts)
-    chosen = pick_highlights(meta, top=args.top, min_score=args.min_score, player=args.player)
-    if args.json:
-        print(json.dumps(chosen, ensure_ascii=False, indent=1))
-    else:
+    ids = _resolve_demos(args.demo)
+    for demo_id in ids:
+        meta = load_meta(storage.parsed_dir(demo_id))
+        opts = {k: getattr(args, k) for k in ("pre", "post", "max_gap", "max_clip") if getattr(args, k) is not None}
+        if opts or args.min_score is not None:
+            meta["highlights"] = detect_highlights(meta, min_score=args.min_score, **opts)
+        chosen = pick_highlights(meta, top=args.top, min_score=args.min_score, player=args.player)
+        if args.json:
+            print(json.dumps(chosen, ensure_ascii=False, indent=1))
+            continue
+        if len(ids) > 1:
+            print(f"\n== {demo_id} ({meta['map']})")
         _print_highlights(chosen)
 
 
@@ -119,10 +151,11 @@ def cmd_render(args: argparse.Namespace) -> None:
 
     if not playwright_available():
         raise SystemExit("Нужен Playwright: pip install playwright && python -m playwright install chromium")
-    demo_id = _resolve_demo(args.demo)
     clip_ids = [c.strip() for c in args.clips.split(",")] if args.clips else None
-    results = render_demo_cli(demo_id, top=args.top, min_score=args.min_score, player=args.player,
-                              clip_ids=clip_ids, **_render_opts(args))
+    results = []
+    for demo_id in _resolve_demos(args.demo):
+        results += render_demo_cli(demo_id, top=args.top, min_score=args.min_score, player=args.player,
+                                   clip_ids=clip_ids, **_render_opts(args))
     if not results:
         print("Нечего записывать: нет подходящих хайлайтов")
         return
@@ -147,7 +180,7 @@ def cmd_watch(args: argparse.Namespace) -> None:
     sizes: dict[str, int] = {}
     print(f"Слежу за {folder} (Ctrl+C — выход)")
     while True:
-        for dem in sorted(folder.glob("**/*.dem")):
+        for dem in sorted([*folder.glob("**/*.dem"), *folder.glob("**/*.rar")]):
             key = str(dem.resolve())
             try:
                 stat = dem.stat()
@@ -161,13 +194,14 @@ def cmd_watch(args: argparse.Namespace) -> None:
                 continue
             print(f"\nНовое демо: {dem.name}")
             try:
-                demo_id = _resolve_demo(str(dem))
-                if args.render:
+                for demo_id in _resolve_demos(str(dem)):
+                    if not args.render:
+                        continue
                     results = render_demo_cli(demo_id, top=args.top, min_score=args.min_score,
                                               player=args.player, clip_ids=None, **_render_opts(args))
                     for r in results:
                         print(f"  клип: {r['path']}")
-            except Exception as exc:  # noqa: BLE001
+            except (Exception, SystemExit) as exc:  # noqa: BLE001 - keep watching
                 print(f"  ошибка: {exc}")
             done[key] = stat.st_mtime
             state_file.write_text(json.dumps(done, ensure_ascii=False, indent=1))
@@ -181,7 +215,7 @@ def cmd_montage(args: argparse.Namespace) -> None:
 
     if not playwright_available():
         raise SystemExit("Нужен Playwright: pip install playwright && python -m playwright install chromium")
-    demo_ids = [_resolve_demo(d) for d in args.demos]
+    demo_ids = [i for d in args.demos for i in _resolve_demos(d)]
     include = [c.strip() for c in args.include.split(",") if c.strip()] if args.include else None
     result = make_montage(
         demo_ids, Path(args.out) if args.out else None, top=args.top, include=include,
@@ -237,7 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--open", action="store_true", help="открыть браузер")
     p.set_defaults(func=cmd_serve)
 
-    p = sub.add_parser("parse", help="разобрать .dem файлы")
+    p = sub.add_parser("parse", help="разобрать .dem файлы или архивы .rar (HLTV)")
     p.add_argument("files", nargs="+")
     p.add_argument("--step", type=int, default=None, help="шаг выборки в тиках (по умолчанию 2)")
     p.add_argument("--force", action="store_true", help="разобрать заново")
@@ -247,7 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_list)
 
     p = sub.add_parser("highlights", help="показать найденные хайлайты")
-    p.add_argument("demo", help="id демо или путь к .dem")
+    p.add_argument("demo", help="id демо или путь к .dem / .rar")
     p.add_argument("--json", action="store_true")
     p.add_argument("--top", type=int)
     p.add_argument("--min-score", type=float)
@@ -259,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_highlights)
 
     p = sub.add_parser("render", help="записать клипы хайлайтов в MP4 (headless Chromium)")
-    p.add_argument("demo", help="id демо или путь к .dem")
+    p.add_argument("demo", help="id демо или путь к .dem / .rar")
     p.add_argument("--clips", help="id хайлайтов через запятую")
     _add_render_args(p)
     p.set_defaults(func=cmd_render)
@@ -272,7 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_watch, top=5)
 
     p = sub.add_parser("montage", help="нарезка лучших моментов одного или нескольких демо в одно видео")
-    p.add_argument("demos", nargs="+", help="id демо или пути к .dem")
+    p.add_argument("demos", nargs="+", help="id демо или пути к .dem / .rar")
     p.add_argument("--include", help="обязательно включить: подстроки id через запятую, например clutch1v5")
     p.add_argument("--per-demo", type=int, help="не больше N моментов из одного демо")
     p.add_argument("--title", default="CS2 хайлайты", help="заголовок титульной карточки")

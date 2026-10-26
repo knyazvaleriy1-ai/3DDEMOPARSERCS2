@@ -7,6 +7,7 @@
 | [three.js](https://threejs.org) r170 (core, OrbitControls, GLTFLoader, SkeletonUtils, BufferGeometryUtils) | `cs2demo/web/vendor/` | MIT, `three.LICENSE` |
 | [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) 5.2.1 | `cs2demo/web/vendor/mp4-muxer.mjs` | MIT, `mp4-muxer.LICENSE` |
 | [demoparser2](https://github.com/LaihoE/demoparser) v0.42.1 parser compiled to WebAssembly by `wasm/build.sh` (with its Rust dependencies — prost, bitter, ahash, snap and others, MIT/Apache-2.0) and the [wasm-bindgen](https://github.com/rustwasm/wasm-bindgen) 0.2.100 JS glue | `cs2demo/web/vendor/demoparser/` | MIT, `demoparser.LICENSE`; wasm-bindgen MIT/Apache-2.0 |
+| [node-unrar-js](https://github.com/YuJianrong/node-unrar.js) 2.0.2: the UnRAR library compiled to WebAssembly and its `Extractor` class (used by `cs2demo/web/js/parse/rar.js` and `cs2demo/unrar_cli.mjs` to open `.rar` archives) | `cs2demo/web/vendor/unrar/` | MIT, `node-unrar-js.LICENSE`; UnRAR by Alexander Roshal — freeware, may be used to handle RAR archives, `unrar.LICENSE` |
 | Killfeed icons from [game-icons.net](https://game-icons.net), rotated and cropped by `scripts/build_icons.py` | `cs2demo/web/js/icons.js` | [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) |
 
 Icon authors (game-icons.net): **Skoll** — ak47, ak47u, fn-fal, famas, steyr-aug,

@@ -4,7 +4,9 @@ import { Viewer } from './viewer.js';
 import { Timeline } from './timeline.js';
 import { ClipsPanel, HighlightsPanel, PlayersPanel, ViewPanel } from './panels.js';
 import { installRenderApi } from './clips.js';
-import { STATIC, demoIdFor, library, parseFile } from './backend.js';
+import {
+  STATIC, demoIdFor, extractEntry, isArchive, isDemoFile, library, listArchive, parseFile,
+} from './backend.js';
 import { esc, fetchJSON, fmtTime, toast } from './util.js';
 
 const $ = (id) => document.getElementById(id);
@@ -114,46 +116,38 @@ class App {
     if (this.demo) $('library').classList.add('hidden');
   }
 
+  /** A .dem, or a .rar with demos inside (HLTV), into the library; opens the first one. */
   async upload(file) {
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.dem')) { toast('Нужен файл .dem', 'error'); return; }
+    const archive = isArchive(file.name);
+    if (!archive && !isDemoFile(file.name)) { toast('Нужен файл .dem или архив .rar', 'error'); return; }
     $('library').classList.remove('hidden');
     const bar = $('upload-progress');
     const text = $('upload-text');
     bar.classList.remove('hidden');
     const setBar = (f) => { bar.firstElementChild.style.width = `${Math.round(f * 100)}%`; };
-    text.textContent = `Загрузка ${file.name}…`;
+    setBar(0);
+    text.textContent = `${archive ? 'Открытие архива' : 'Загрузка'} ${file.name}…`;
     try {
-      const res = STATIC ? await this._parseLocal(file, setBar, text) : await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/demos');
-        xhr.upload.onprogress = (e) => e.lengthComputable && setBar(0.5 * e.loaded / e.total);
-        xhr.onload = () => {
-          let body = {};
-          try { body = JSON.parse(xhr.responseText); } catch (_) { /* ignore */ }
-          if (xhr.status >= 200 && xhr.status < 300) resolve(body);
-          else reject(new Error(body.detail || `Ошибка загрузки (${xhr.status})`));
-        };
-        xhr.onerror = () => reject(new Error('Сеть недоступна'));
-        const form = new FormData();
-        form.append('file', file);
-        xhr.send(form);
-      });
-      let status = STATIC ? { status: 'ready' } : res;
-      while (status.status !== 'ready') {
-        if (status.status === 'error') throw new Error(status.message || 'Ошибка разбора');
-        setBar(0.5 + 0.5 * (status.progress || 0));
-        text.textContent = `Разбор демо: ${status.message || '…'}`;
-        await new Promise((r) => setTimeout(r, 600));
-        status = await fetchJSON(`/api/demos/${res.id}`);
+      let entries = [null];
+      if (archive) {
+        const demos = await listArchive(file);
+        if (!demos.length) throw new Error('В архиве нет демо (.dem)');
+        entries = demos.length === 1 ? demos : await this._pickEntries(file.name, demos);
+        if (!entries.length) { text.textContent = ''; return; }
+      }
+      const ids = [];
+      for (const [i, entry] of entries.entries()) {
+        const label = entries.length > 1 ? ` (${i + 1} из ${entries.length})` : '';
+        ids.push(await this._ingest(file, entry, setBar, text, label));
       }
       setBar(1);
       text.textContent = 'Готово!';
       const auto = this.highlightsPanel.opts.auto;
-      if (this.demo) location.href = `?demo=${encodeURIComponent(res.id)}${auto ? '&autorecord=1' : ''}`;
+      if (this.demo) location.href = `?demo=${encodeURIComponent(ids[0])}${auto ? '&autorecord=1' : ''}`;
       else {
         $('library').classList.add('hidden');
-        await this.open(res.id);
+        await this.open(ids[0]);
         if (auto) this.highlightsPanel.autoRecord(5);
       }
     } catch (err) {
@@ -164,12 +158,52 @@ class App {
     }
   }
 
+  /** One demo (a .dem file, or ``entry`` of a .rar) into the library; returns its id. */
+  async _ingest(file, entry, setBar, text, label) {
+    if (STATIC) return this._parseLocal(file, entry, setBar, text, label);
+    let dem = file;
+    if (entry) {
+      // The server only takes .dem files: unpack here, then upload.
+      dem = await extractEntry(file, entry, (f, m) => { setBar(0.3 * f); text.textContent = `${m}${label}…`; });
+    }
+    const base = entry ? 0.3 : 0;
+    const span = (from, to) => (f) => setBar(base + (1 - base) * (from + (to - from) * f));
+    text.textContent = `Загрузка ${dem.name}${label}…`;
+    const res = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/demos');
+      xhr.upload.onprogress = (e) => e.lengthComputable && span(0, 0.5)(e.loaded / e.total);
+      xhr.onload = () => {
+        let body = {};
+        try { body = JSON.parse(xhr.responseText); } catch (_) { /* ignore */ }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(body);
+        else reject(new Error(body.detail || `Ошибка загрузки (${xhr.status})`));
+      };
+      xhr.onerror = () => reject(new Error('Сеть недоступна'));
+      const form = new FormData();
+      form.append('file', dem);
+      xhr.send(form);
+    });
+    let status = res;
+    while (status.status !== 'ready') {
+      if (status.status === 'error') throw new Error(status.message || 'Ошибка разбора');
+      span(0.5, 1)(status.progress || 0);
+      text.textContent = `Разбор демо${label}: ${status.message || '…'}`;
+      await new Promise((r) => setTimeout(r, 600));
+      status = await fetchJSON(`/api/demos/${res.id}`);
+    }
+    return res.id;
+  }
+
   /** Static version: parse in a worker, keep the result in IndexedDB. */
-  async _parseLocal(file, setBar, text) {
-    const id = demoIdFor(file);
-    text.textContent = `Разбор ${file.name}…`;
+  async _parseLocal(file, entry, setBar, text, label) {
+    const id = demoIdFor(file, entry);
+    const name = entry ? entry.name.split(/[\\/]/).pop() : file.name;
+    if (await library.has(id)) return id; // parsed before: just open it
+    text.textContent = `Разбор ${name}${label}…`;
     const { meta, frames } = await parseFile(file, {
-      onProgress: (f, m) => { setBar(f); text.textContent = `Разбор демо (в браузере): ${m}`; },
+      entry,
+      onProgress: (f, m) => { setBar(f); text.textContent = `Разбор демо в браузере${label}: ${m}`; },
     });
     meta.id = id;
     text.textContent = 'Сохранение…';
@@ -178,7 +212,28 @@ class App {
     } catch (err) {
       throw new Error(`Не удалось сохранить разобранное демо в браузере (${err.message || err}). Освободите место и попробуйте снова.`);
     }
-    return { id, status: 'ready' };
+    return id;
+  }
+
+  /** Which demos of a multi-map archive to parse. Resolves to the chosen entries ([] = cancel). */
+  _pickEntries(archiveName, entries) {
+    const dlg = $('archive-picker');
+    $('picker-note').textContent = `${archiveName}: ${entries.length} демо. Каждая карта разбирается отдельно`
+      + `${STATIC ? ' (в браузере, около минуты на карту)' : ''}; уже разобранные откроются сразу.`;
+    $('picker-list').innerHTML = entries.map((e, i) => `
+      <label class="check"><input type="checkbox" data-i="${i}" ${i === 0 ? 'checked' : ''}>
+        <span>${esc(e.name.split(/[\\/]/).pop())}</span><span class="muted small">${Math.round(e.size / 1e6)} МБ</span></label>`).join('');
+    dlg.classList.remove('hidden');
+    return new Promise((resolve) => {
+      const finish = (chosen) => {
+        dlg.classList.add('hidden');
+        $('picker-ok').onclick = $('picker-cancel').onclick = $('picker-close').onclick = null;
+        resolve(chosen);
+      };
+      $('picker-ok').onclick = () => finish(
+        [...$('picker-list').querySelectorAll('input:checked')].map((c) => entries[Number(c.dataset.i)]));
+      $('picker-cancel').onclick = $('picker-close').onclick = () => finish([]);
+    });
   }
 
   // -- UI wiring ----------------------------------------------------------------------
@@ -207,7 +262,7 @@ class App {
       document.body.classList.add('static');
       // Android pickers grey out unknown extensions like .dem: accept anything.
       for (const input of [$('file-input'), $('file-input-2')]) input.removeAttribute('accept');
-      $('btn-open-label').firstChild.textContent = 'Открыть .dem';
+      $('btn-open-label').firstChild.textContent = 'Открыть демо';
       $('dz-note').textContent = 'Демо разбирается прямо в браузере: файл никуда не загружается и остаётся на этом устройстве.';
     }
     for (const input of [$('file-input'), $('file-input-2')]) {

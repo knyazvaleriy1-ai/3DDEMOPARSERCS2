@@ -41,7 +41,7 @@
 **https://knyazvaleriy1-ai.github.io/3DDEMOPARSERCS2/** (GitHub Pages) или свой
 адрес на Vercel — как опубликовать, см. [«Публикация сайта»](#публикация-сайта).
 
-Откройте ссылку, нажмите «Открыть .dem» и выберите файл демо. Ничего не
+Откройте ссылку, нажмите «Открыть демо» и выберите `.dem` или архив `.rar` с HLTV. Ничего не
 загружается на сервер: демо разбирает прямо в браузере тот же парсер
 (demoparser2, скомпилированный в WebAssembly), а логика сборки данных — точная
 копия Python-парсера (вывод совпадает байт в байт). Разобранные демо и записанные
@@ -53,8 +53,11 @@
   за 40–80 секунд на компьютере и дольше на телефоне. Браузеру нужно примерно
   в 2–3 раза больше памяти, чем весит файл: очень большие демо на слабых
   телефонах могут не открыться.
-- Архив `.rar` с HLTV сначала распакуйте (на Android — приложения RAR или
-  ZArchiver) и откройте нужную карту `.dem`.
+- Архив `.rar` с HLTV открывается как есть: сайт сам распакует его прямо в
+  браузере и спросит, какие карты разобрать (уже разобранные откроются сразу).
+  Архив читается по кускам, а распакованное сразу уходит в парсер, поэтому
+  памяти нужно столько же, сколько для обычной `.dem`. Архивы с паролем и
+  многотомные (`.part1.rar`…) не поддерживаются.
 - Чего нет в веб-версии: рендера на сервере, папки-наблюдателя и склейки нарезки —
   для этого нужна обычная (Python) версия.
 
@@ -112,7 +115,7 @@ python -m venv .venv
 .venv/bin/python -m cs2demo serve --open
 ```
 
-Откроется `http://127.0.0.1:8000`. Перетащите `.dem` файл в окно — он разберётся,
+Откроется `http://127.0.0.1:8000`. Перетащите `.dem` или архив `.rar` в окно — он разберётся,
 и откроется 3D-просмотр. При первом открытии карты её 3D-геометрия и радар
 скачиваются из релизов [awpy-data](https://github.com/pnxenopoulos/awpy-data)
 (1–10 МБ на карту) и кешируются в `data/maps/`, а модель игрока (2 МБ) — в
@@ -123,7 +126,9 @@ python -m venv .venv
 
 - **Матчмейкинг CS2:** «Смотреть» → «Ваши матчи» → скачать. Файлы лежат в
   `…\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo\replays\`.
-- **FACEIT / HLTV:** скачайте архив матча и распакуйте `.dem`.
+- **HLTV:** архив `.rar` можно открывать как есть — он распакуется сам (в браузере
+  или, в командной строке, системным unrar / 7-Zip / tar).
+- **FACEIT:** скачайте архив матча и распакуйте `.dem`.
 
 ## Управление
 
@@ -245,6 +250,7 @@ Ancient, Anubis, Train, Cache, Office, Italy (`web/js/palettes.js`) — цвет
 ```bash
 python -m cs2demo serve [--port 8000] [--host 127.0.0.1] [--open]
 python -m cs2demo parse match.dem                       # разобрать (можно несколько файлов)
+python -m cs2demo parse match.rar                       # архив HLTV: распакует и разберёт все карты
 python -m cs2demo list                                  # разобранные демо
 python -m cs2demo highlights match.dem --top 10         # найденные хайлайты (--json, --player, --min-score)
 python -m cs2demo render match.dem --top 5 --pov first --res 1920x1080 --fps 60 --slowmo
@@ -260,6 +266,12 @@ python -m cs2demo maps de_mirage de_inferno             # заранее ска�
 использует видеокарту, если она доступна; без неё рендер идёт на процессоре
 (SwiftShader, ~1 с на кадр 720p), и в режиме `auto` карта рисуется упрощёнными
 материалами — `--quality high` включает полные.
+
+Архивы `.rar` принимают все команды (`parse`, `highlights`, `render`, `montage`,
+`watch` следит и за ними): из архива берутся все `.dem`. Для распаковки нужен
+один из: `unrar`, 7-Zip (`7z`/`7zz`), `bsdtar` (в Windows 10+ и macOS он
+встроен как `tar`), `unar` или Node.js — тогда работает тот же WebAssembly-UnRAR,
+что и в браузере.
 
 Переменные окружения:
 
@@ -281,11 +293,13 @@ cs2demo/
   recorder.py    headless-рендер клипов: Chromium (Playwright) → JPEG-кадры → ffmpeg → MP4
   montage.py     нарезка: выбор лучших моментов нескольких демо, рендер, склейка
   cli.py         команды serve / parse / list / highlights / render / watch / maps
+  archives.py    .rar: распаковка системным unrar / 7-Zip / bsdtar / unar или Node.js (unrar_cli.mjs)
   models.py      модель игрока: загрузка по умолчанию и пользовательские замены
   web/           просмотрщик (Three.js, без сборки)
     js/backend.js  откуда данные: сервер (/api) или браузер (IndexedDB, статические ассеты)
-    js/parse/      парсер в браузере: порт parser.py и highlights.py + Web Worker
+    js/parse/      парсер в браузере: порт parser.py и highlights.py, распаковка .rar, Web Worker
     vendor/demoparser/  demoparser2 в WebAssembly (собирается wasm/build.sh)
+    vendor/unrar/  UnRAR в WebAssembly (node-unrar-js)
     js/viewer.js   сцена, камеры, воспроизведение
     js/map.js      меш карты, процедурная раскраска, тени, небо
     js/palettes.js палитры карт
@@ -329,7 +343,8 @@ python -m pytest
 
 Код проекта — MIT. Сторонние материалы перечислены в
 [THIRD_PARTY.md](THIRD_PARTY.md): three.js и mp4-muxer (MIT), иконки game-icons.net
-(CC BY 3.0), demoparser2 в WebAssembly (MIT). Геометрия карт и радары
+(CC BY 3.0), demoparser2 в WebAssembly (MIT), UnRAR в WebAssembly (node-unrar-js — MIT,
+UnRAR — лицензия UnRAR, freeware). Геометрия карт и радары
 (собственность Valve) и модель игрока не входят в репозиторий — они скачиваются
 на ваш компьютер при первом запуске, а для веб-версии — при сборке сайта.
 Проект не связан с Valve.

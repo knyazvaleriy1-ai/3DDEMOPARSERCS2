@@ -13,8 +13,8 @@
     <div id="demo-title" class="demo-title"></div>
     <div class="spacer"></div>
     <button id="btn-library" class="btn">Демки</button>
-    <label class="btn primary" id="btn-open-label" title="Загрузить демо CS2">Загрузить .dem
-      <input type="file" id="file-input" accept=".dem" hidden>
+    <label class="btn primary" id="btn-open-label" title="Демо CS2: .dem или архив .rar (HLTV)">Загрузить демо
+      <input type="file" id="file-input" accept=".dem,.rar" hidden>
     </label>
   </header>
 
@@ -91,13 +91,31 @@
         <button id="library-close" class="btn icon" title="Закрыть">✕</button>
       </div>
       <div id="dropzone" class="dropzone">
-        <div class="dz-title">Перетащите сюда .dem файл CS2</div>
-        <div class="dz-sub">или <label class="link">выберите файл<input type="file" id="file-input-2" accept=".dem" hidden></label>.
+        <div class="dz-title">Перетащите сюда демо CS2: .dem или архив .rar</div>
+        <div class="dz-sub">или <label class="link">выберите файл<input type="file" id="file-input-2" accept=".dem,.rar" hidden></label>.
+          Архивы с HLTV распаковываются сами.
           <span id="dz-note">Демо разбирается на вашем компьютере, ничего никуда не отправляется.</span></div>
         <div id="upload-progress" class="bar hidden"><div></div></div>
         <div id="upload-text" class="dz-sub"></div>
       </div>
       <div id="demo-list" class="demo-list"></div>
+    </div>
+  </div>
+
+  <div id="archive-picker" class="modal hidden">
+    <div class="modal-card picker-card">
+      <div class="modal-head">
+        <h2>Какие карты разобрать?</h2>
+        <button id="picker-close" class="btn icon" title="Закрыть">✕</button>
+      </div>
+      <div class="picker-body">
+        <p id="picker-note" class="muted small"></p>
+        <div id="picker-list" class="picker-list"></div>
+        <div class="btn-row">
+          <button id="picker-ok" class="btn primary">Разобрать</button>
+          <button id="picker-cancel" class="btn">Отмена</button>
+        </div>
+      </div>
     </div>
   </div>
 
