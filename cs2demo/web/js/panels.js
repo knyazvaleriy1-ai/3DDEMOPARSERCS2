@@ -6,6 +6,9 @@ import {
   ClipDirector, POV_LABELS, downloadBlob, exportMp4, exportRealtime, uploadClip, webCodecsSupported,
 } from './clips.js';
 import { VOICE_LABELS } from './voice.js';
+import { PovDirector } from './pov.js';
+
+const FF_LABELS = { 4: 'ускорять ×4', 8: 'ускорять ×8', 16: 'ускорять ×16', 0: 'вырезать' };
 
 // -- Players ------------------------------------------------------------------------
 
@@ -150,6 +153,7 @@ export class HighlightsPanel {
         </div>
         <div class="status-line" id="rec-status"></div>
       </div>
+      ${this._povPanel()}
       <div class="panel">
         <div class="form-grid">
           <label>Мин. очков</label><input type="range" min="0" max="150" step="5" value="${this.filter.minScore}" data-filter="minScore">
@@ -167,6 +171,89 @@ export class HighlightsPanel {
     this.el.querySelector('[data-filter=kind]').value = this.filter.kind;
     this._bind();
     this.renderList();
+  }
+
+  /** POV of one player over chosen rounds (fast-forward after their death). */
+  _povPanel() {
+    const d = this.demo, o = this.opts;
+    const focus = this.viewer.focus;
+    if (o.povPlayer === undefined || o.povPlayer >= d.P) o.povPlayer = focus >= 0 ? focus : 0;
+    const players = d.players.map((p, i) => `<option value="${i}" ${o.povPlayer === i ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+    const n = d.rounds.length;
+    const from = Math.min(o.povFrom || 1, n), to = Math.min(o.povTo || n, n);
+    const rounds = (sel) => d.rounds.map((r) => `<option value="${r.num}" ${r.num === sel ? 'selected' : ''}>${r.num}</option>`).join('');
+    return `
+      <div class="panel">
+        <h3>POV игрока</h3>
+        <div class="form-grid">
+          <label>Игрок</label><select data-opt="povPlayer">${players}</select>
+          <label>Раунды</label>
+          <div class="range-pair"><select data-opt="povFrom">${rounds(from)}</select> — <select data-opt="povTo">${rounds(to)}</select></div>
+          <label title="Что делать с остатком раунда, когда игрок умер">После смерти</label>
+          <select data-opt="povFF">${Object.entries(FF_LABELS).map(([k, v]) => `<option value="${k}" ${String(o.povFF) === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
+        </div>
+        <p class="muted small">Вид от первого лица по целым раундам: пока игрок жив — обычная скорость,
+          после смерти (2 с death cam) остаток раунда ускоряется, камера переходит на живого тиммейта.
+          Закупка пропускается. Войс — по настройке выше (команда игрока: то, что он слышал и говорил).</p>
+        <div class="btn-row">
+          <button class="btn" data-act="pov-watch">▶ Смотреть POV</button>
+          <button class="btn primary" data-act="pov-rec">● Записать POV</button>
+          ${STATIC ? '' : '<button class="btn" data-act="pov-server" title="Покадровый рендер в MP4 на сервере">Рендер на сервере</button>'}
+        </div>
+      </div>`;
+  }
+
+  _povRounds() {
+    const o = this.opts;
+    const a = Math.min(o.povFrom || 1, o.povTo || 1e9), b = Math.max(o.povFrom || 1, o.povTo || 1e9);
+    return this.demo.rounds.map((r, i) => [r, i]).filter(([r]) => r.num >= a && r.num <= b).map(([, i]) => i);
+  }
+
+  /** Watch the POV live: first person, fast-forward after death, from the first chosen round. */
+  watchPov() {
+    const v = this.viewer, d = this.demo, o = this.opts;
+    const rounds = this._povRounds();
+    if (!rounds.length) return;
+    v.setPovFF(Number(o.povFF) || 0);
+    v.setTick(d.rounds[rounds[0]].freezeEnd - 2 * d.tickRate);
+    v.setMode('pov', Number(o.povPlayer));
+    v.play();
+  }
+
+  async recordPov() {
+    const o = this.opts;
+    const [width, height] = RESOLUTIONS[o.res] || RESOLUTIONS['720p'];
+    let director;
+    try {
+      director = new PovDirector(this.viewer, Number(o.povPlayer), this._povRounds(), {
+        fps: o.fps, width, height, hud: o.hud, sound: o.sound, keys: o.keys, voice: o.voice, ff: Number(o.povFF),
+      });
+    } catch (err) {
+      toast(err.message, 'error');
+      return;
+    }
+    const minutes = director.count / o.fps / 60;
+    if (minutes > 12 && !confirm(`Видео выйдет на ${Math.round(minutes)} мин — запись займёт время. Продолжить?`)) return;
+    await this._record([director], (i, f) => `POV ${director.h.playerName} — ${Math.round(f * 100)}%`);
+  }
+
+  async serverRenderPov() {
+    const o = this.opts;
+    const [width, height] = RESOLUTIONS[o.res] || RESOLUTIONS['720p'];
+    const rounds = this._povRounds().map((i) => this.demo.rounds[i].num);
+    try {
+      const res = await fetchJSON(`/api/demos/${this.demo.meta.id}/render-pov`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ player: this.demo.players[Number(o.povPlayer)].name, rounds, ff: Number(o.povFF),
+          width, height, fps: o.fps, hud: o.hud, sound: o.sound, keys: o.keys, voice: o.voice }),
+      });
+      this._status('Рендер POV на сервере запущен');
+      this._pollJob(res.job);
+    } catch (err) {
+      this._status(err.message);
+      toast(err.message, 'error', 6000);
+    }
   }
 
   _visible() {
@@ -207,7 +294,8 @@ export class HighlightsPanel {
     const el = this.el;
     el.querySelectorAll('[data-opt]').forEach((input) => input.addEventListener('change', () => {
       const k = input.dataset.opt;
-      this.opts[k] = input.type === 'checkbox' ? input.checked : k === 'fps' ? Number(input.value) : input.value;
+      const numeric = ['fps', 'povPlayer', 'povFrom', 'povTo', 'povFF'].includes(k);
+      this.opts[k] = input.type === 'checkbox' ? input.checked : numeric ? Number(input.value) : input.value;
       saveOpts(this.opts);
     }));
     el.querySelectorAll('[data-filter]').forEach((input) => input.addEventListener('input', () => {
@@ -241,6 +329,9 @@ export class HighlightsPanel {
       }
       case 'record': return this.recordList(this.demo.highlights.filter((x) => this.selected.has(x.id)));
       case 'server': return this.serverRender();
+      case 'pov-watch': return this.watchPov();
+      case 'pov-rec': return this.recordPov();
+      case 'pov-server': return this.serverRenderPov();
       case 'top5':
         this.selected = new Set([...this._visible()].sort((a, b) => b.score - a.score).slice(0, 5).map((x) => x.id));
         return this.renderList();
@@ -278,10 +369,19 @@ export class HighlightsPanel {
   }
 
   async recordList(list) {
-    if (this.busy) { toast('Запись уже идёт'); return; }
     if (!list.length) { toast('Отметьте хайлайты для записи'); return; }
     const [width, height] = RESOLUTIONS[this.opts.res] || RESOLUTIONS['720p'];
-    const fps = this.opts.fps;
+    const directors = list.map((h) => new ClipDirector(this.viewer, h, {
+      pov: this.opts.pov, fps: this.opts.fps, width, height, slowmo: this.opts.slowmo, hud: this.opts.hud,
+      sound: this.opts.sound, keys: this.opts.keys, voice: this.opts.voice,
+    }));
+    await this._record(directors, (i, f) => `Клип ${i + 1}/${list.length}: ${list[i].title} — ${Math.round(f * 100)}%`);
+  }
+
+  /** Encode each director's video and save it (clips tab), one after another. */
+  async _record(directors, label) {
+    if (this.busy) { toast('Запись уже идёт'); return; }
+    const { width, height, fps } = directors[0].opts;
     const fast = await webCodecsSupported(width, height, fps);
     this.busy = true;
     this.abort = new AbortController();
@@ -289,18 +389,14 @@ export class HighlightsPanel {
     const recText = document.getElementById('rec-text');
     rec.classList.remove('hidden');
     document.getElementById('rec-cancel').onclick = () => this.abort?.abort();
+    const list = directors;
     let saved = 0;
     try {
       for (let i = 0; i < list.length; i++) {
-        const h = list[i];
-        const director = new ClipDirector(this.viewer, h, {
-          pov: this.opts.pov, fps, width, height, slowmo: this.opts.slowmo, hud: this.opts.hud, sound: this.opts.sound,
-          keys: this.opts.keys, voice: this.opts.voice,
-        });
-        const label = `Клип ${i + 1}/${list.length}: ${h.title}`;
+        const director = list[i];
         const onProgress = (f) => {
           recText.textContent = `REC ${i + 1}/${list.length} · ${Math.round(f * 100)}%`;
-          this._status(`${label} — ${Math.round(f * 100)}%${fast ? '' : ' (реальное время, не сворачивайте вкладку)'}`);
+          this._status(`${label(i, f)}${fast ? '' : ' (реальное время, не сворачивайте вкладку)'}`);
         };
         const blob = fast
           ? await exportMp4(director, { onProgress, signal: this.abort.signal })
@@ -370,6 +466,7 @@ export class HighlightsPanel {
 function loadOpts() {
   const defaults = {
     pov: 'first', res: '720p', fps: 30, slowmo: false, hud: true, sound: true, keys: false, voice: 'team', auto: false,
+    povFF: 8,
   };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem('cs2demo.rec') || '{}') };
@@ -565,6 +662,9 @@ export class ViewPanel {
         <label class="check" title="Какие клавиши и кнопки мыши жмёт выбранный игрок. Клавиша K">
           <input type="checkbox" data-s="keys" ${s.keys ? 'checked' : ''}> Экранная клавиатура (K)</label>
         ${keysNote(this.viewer.demo)}
+        <label class="field" title="Режим «От 1-го лица»: что делать, когда игрок умер (кнопка ⏩, клавиша F)">После смерти игрока (от 1-го лица)
+          <select data-s="povFF">${[[0, 'обычная скорость'], [4, 'ускорить ×4'], [8, 'ускорить ×8'], [16, 'ускорить ×16']]
+            .map(([k, t]) => `<option value="${k}" ${s.povFF === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       </div>
       <div class="panel">
         <h3>Крыши и потолки</h3>
@@ -580,12 +680,14 @@ export class ViewPanel {
         <div class="btn-row"><button class="btn small" data-act="reset">Сбросить камеру</button></div>
         <p class="muted small">Мышь: ЛКМ — вращать, ПКМ — сдвиг, колесо — зум.<br>
         Клавиши: Пробел — пауза, ←/→ — 5 с, Shift+←/→ — раунд, 1–6 — камера
-        (свободная, следить, от 1-го лица, из-за спины, сверху, обзор), [ и ] — скорость, Tab — следующий игрок, K — экранная клавиатура.</p>
+        (свободная, следить, от 1-го лица, из-за спины, сверху, обзор), [ и ] — скорость, Tab — следующий игрок, K — экранная клавиатура,
+        V — войс, F — ускорять раунд после смерти игрока.</p>
         <p class="muted small">Карта: ${esc(mapKind)}</p>
       </div>`;
     this.el.querySelectorAll('[data-s]').forEach((input) => input.addEventListener('input', () => {
       const k = input.dataset.s;
       if (k === 'keys') { this.viewer.setKeys(input.checked); return; }
+      if (k === 'povFF') { this.viewer.setPovFF(Number(input.value)); return; }
       s[k] = input.type === 'checkbox' ? input.checked : k === 'cutHeight' ? Number(input.value) : input.value;
       if (k === 'roofCut') this.el.querySelector('[data-s=cutHeight]').disabled = s.roofCut !== 'manual';
       this.viewer.applySettings();

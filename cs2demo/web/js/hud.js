@@ -55,6 +55,7 @@ export class Hud {
       c.fillRect(0, 0, W, H);
     }
     if (this.options.scorebar) this._scorebar(info, W, s);
+    if (info.banner) this._banner(info.banner, W, s);
     if (this.options.killfeed) this._killfeed(info, W, s);
     if (info.pov && info.povState && info.povState.present) this._povHud(info, W, H, s);
     this._kbTop = null;
@@ -257,6 +258,20 @@ export class Hud {
       this._text(text, W / 2, H * 0.68, size, count >= 3 ? '#ffd34d' : '#ffffff', 'center', 800);
       c.globalAlpha = 1;
     }
+  }
+
+  /** POV line under the score: whose eyes, whom we watch after their death, ▶▶ speed. */
+  _banner(b, W, s) {
+    const c = this.ctx;
+    const ff = b.ff ? `▶▶ ×${b.ff >= 9.5 ? Math.round(b.ff) : b.ff.toFixed(1).replace(/\.0$/, '')}` : '';
+    c.font = `600 ${13 * s}px ${FONT}`;
+    const tw = c.measureText(b.text).width;
+    c.font = `800 ${14 * s}px ${FONT}`;
+    const fw = ff ? c.measureText(ff).width + 12 * s : 0;
+    const w = tw + fw + 24 * s, h = 26 * s, x = W / 2 - w / 2, y = 60 * s;
+    this._panel(x, y, w, h, 6 * s, 'rgba(10,12,15,0.78)', ff ? '#ffb02e' : null);
+    this._text(b.text, x + 12 * s, y + h / 2, 13 * s, '#e7e9ee', 'left', 600);
+    if (ff) this._text(ff, x + 12 * s + tw + 12 * s, y + h / 2, 14 * s, '#ffb02e', 'left', 800);
   }
 
   /** Who is talking on voice chat: a mic and the name, lower left. */

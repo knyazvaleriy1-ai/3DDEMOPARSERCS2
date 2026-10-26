@@ -209,3 +209,6 @@ body.render-mode #stage { position: fixed; inset: 0; }
   .dropzone { margin: 10px; padding: 14px; }
   .demo-list { padding: 0 10px 10px; }
 }
+label.field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; color: var(--muted); font-size: 13px; }
+.range-pair { display: flex; gap: 6px; align-items: center; }
+.range-pair select { flex: 1; min-width: 0; }

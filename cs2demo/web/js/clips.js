@@ -29,7 +29,8 @@ export function clipTicks(h, fps, slowmo, rate) {
 }
 
 export class ClipDirector {
-  constructor(viewer, highlight, opts = {}) {
+  /** ``ticks``: frame -> demo tick (default: the highlight, with slow motion if asked). */
+  constructor(viewer, highlight, opts = {}, ticks = null) {
     this.viewer = viewer;
     this.h = highlight;
     this.opts = {
@@ -37,7 +38,7 @@ export class ClipDirector {
     };
     this.opts.width -= this.opts.width % 2;
     this.opts.height -= this.opts.height % 2;
-    this.ticks = clipTicks(highlight, this.opts.fps, this.opts.slowmo, viewer.demo.tickRate);
+    this.ticks = ticks || clipTicks(highlight, this.opts.fps, this.opts.slowmo, viewer.demo.tickRate);
     this.canvas = document.createElement('canvas');
     this.canvas.width = this.opts.width;
     this.canvas.height = this.opts.height;
@@ -109,6 +110,11 @@ export class ClipDirector {
     return this._audio;
   }
 
+  /** Sound of frames [a, b) (one part here: the whole clip). */
+  async audioRange(a, b) {
+    return a === 0 && b === this.count ? this.audio() : null;
+  }
+
   get info() {
     const h = this.h, o = this.opts;
     return {
@@ -161,7 +167,56 @@ export async function webCodecsSupported(width = 1280, height = 720, fps = 30) {
   }
 }
 
-/** Frame-exact export to MP4 (H.264 + AAC) with WebCodecs. Returns a Blob. */
+/**
+ * Collects a StreamTarget's output as Blob parts (browsers keep big Blobs on
+ * disk), so hour-long POV videos never sit in memory. Writes come in order
+ * except the few header bytes patched at the end, which land in ``head``.
+ */
+function blobSink() {
+  const HEAD = 1 << 20;
+  const head = new Uint8Array(HEAD);
+  let headLen = 0, tail = 0, pendingBytes = 0;
+  const parts = [];
+  let pending = [];
+  const flush = () => {
+    if (pending.length) parts.push(new Blob(pending));
+    pending = [];
+    pendingBytes = 0;
+  };
+  const writable = new WritableStream({
+    write({ data, position }) {
+      let off = 0;
+      if (position < HEAD) {
+        off = Math.min(data.length, HEAD - position);
+        head.set(data.subarray(0, off), position);
+        headLen = Math.max(headLen, position + off);
+      }
+      if (off < data.length) {
+        if (position + off !== HEAD + tail) throw new Error(`MP4: unexpected write at ${position + off}`);
+        pending.push(data.slice(off));
+        pendingBytes += data.length - off;
+        tail += data.length - off;
+        if (pendingBytes >= 16 << 20) flush();
+      }
+    },
+  });
+  return {
+    writable,
+    blob(type) {
+      flush();
+      return new Blob([head.subarray(0, headLen), ...parts], { type });
+    },
+  };
+}
+
+// Directors without parts (highlight clips) have one: the whole clip.
+const audioParts = (director) => director.audioParts || [[0, director.count]];
+
+/**
+ * Frame-exact export to MP4 (H.264 + AAC) with WebCodecs. Returns a Blob.
+ * Sound is rendered and added part by part (a POV video: per round) right
+ * before that part's frames; videos over a few minutes stream to Blob parts.
+ */
 export async function exportMp4(director, { onProgress, signal } = {}) {
   const mb = await loadMediabunny();
   const { width, height, fps } = director.opts;
@@ -169,17 +224,22 @@ export async function exportMp4(director, { onProgress, signal } = {}) {
   if (!codec) throw new Error('WebCodecs недоступен');
   director.codec = codec;
   onProgress?.(0);
-  const sound = await director.audio();
   let audioCodec = null;
-  if (sound) {
-    const opts = { numberOfChannels: sound.numberOfChannels, sampleRate: sound.sampleRate, bitrate: AUDIO_BITRATE };
+  if (director.opts.sound && typeof OfflineAudioContext !== 'undefined') {
+    const opts = { numberOfChannels: 2, sampleRate: 48000, bitrate: AUDIO_BITRATE };
     for (const c of ['aac', 'opus']) {
       if (await mb.canEncodeAudio(c, opts)) { audioCodec = c; break; }
     }
     if (!audioCodec) console.warn('no audio encoder: the clip will be silent');
   }
   director.audioCodec = audioCodec;
-  const output = new mb.Output({ format: new mb.Mp4OutputFormat({ fastStart: 'in-memory' }), target: new mb.BufferTarget() });
+  const n = director.count;
+  const long = n / fps > 150;
+  const sink = long ? blobSink() : null;
+  const output = new mb.Output({
+    format: new mb.Mp4OutputFormat({ fastStart: long ? false : 'in-memory' }),
+    target: long ? new mb.StreamTarget(sink.writable, { chunked: true, chunkSize: 4 << 20 }) : new mb.BufferTarget(),
+  });
   const video = new mb.CanvasSource(director.canvas, {
     codec, bitrate: videoBitrate(width, height, fps), keyFrameInterval: 2,
   });
@@ -188,16 +248,20 @@ export async function exportMp4(director, { onProgress, signal } = {}) {
   if (audio) output.addAudioTrack(audio);
   await output.start();
   try {
-    if (audio) await audio.add(sound);
     director.start();
-    const n = director.count;
-    for (let i = 0; i < n; i++) {
-      if (signal?.aborted) throw new DOMException('Отменено', 'AbortError');
-      director.render(i);
-      await video.add(i / fps, 1 / fps);
-      if (i % 4 === 0) {
-        onProgress?.(i / n);
-        await nextFrame();
+    for (const [a, b] of audioParts(director)) {
+      if (audio) {
+        const sound = await director.audioRange(a, b);
+        await audio.add(sound || silence(b - a, fps));
+      }
+      for (let i = a; i < b; i++) {
+        if (signal?.aborted) throw new DOMException('Отменено', 'AbortError');
+        director.render(i);
+        await video.add(i / fps, 1 / fps);
+        if (i % 4 === 0) {
+          onProgress?.(i / n);
+          await nextFrame();
+        }
       }
     }
     await output.finalize();
@@ -208,7 +272,13 @@ export async function exportMp4(director, { onProgress, signal } = {}) {
     director.finish();
   }
   onProgress?.(1);
-  return new Blob([output.target.buffer], { type: 'video/mp4' });
+  return long ? sink.blob('video/mp4') : new Blob([output.target.buffer], { type: 'video/mp4' });
+}
+
+/** ``frames`` worth of stereo silence (keeps audio and video in step). */
+function silence(frames, fps) {
+  const ctx = new OfflineAudioContext(2, Math.max(1, Math.round((frames / fps) * 48000)), 48000);
+  return ctx.createBuffer(2, ctx.length, 48000);
 }
 
 function recorderMime() {
@@ -221,19 +291,18 @@ export async function exportRealtime(director, { onProgress, signal } = {}) {
   if (!window.MediaRecorder) throw new Error('Браузер не умеет записывать видео (нет MediaRecorder)');
   const { fps, width, height } = director.opts;
   const mime = recorderMime();
-  const sound = await director.audio();
+  const parts = audioParts(director);
+  const first = director.opts.sound ? await director.audioRange(parts[0][0], parts[0][1]) : null;
   director.start();
   const stream = director.canvas.captureStream(fps);
-  let audioCtx = null, audioSrc = null;
-  if (sound) {
-    audioCtx = new AudioContext({ sampleRate: sound.sampleRate });
+  let audioCtx = null, dest = null;
+  const sources = [];
+  if (first) {
+    audioCtx = new AudioContext({ sampleRate: first.sampleRate });
     // Created after awaits, i.e. outside the click: mobile browsers start it
     // suspended, which records silence.
     await audioCtx.resume().catch(() => {});
-    const dest = audioCtx.createMediaStreamDestination();
-    audioSrc = audioCtx.createBufferSource();
-    audioSrc.buffer = sound;
-    audioSrc.connect(dest);
+    dest = audioCtx.createMediaStreamDestination();
     dest.stream.getAudioTracks().forEach((t) => stream.addTrack(t));
   }
   const rec = new MediaRecorder(stream, {
@@ -246,8 +315,25 @@ export async function exportRealtime(director, { onProgress, signal } = {}) {
   try {
     director.render(0);
     rec.start(500);
-    if (audioSrc) audioSrc.start();
     const t0 = performance.now();
+    if (audioCtx) {
+      // Schedule each part's sound at its place, rendering the next while one plays.
+      const at0 = audioCtx.currentTime;
+      (async () => {
+        for (let k = 0; k < parts.length; k++) {
+          const [a, b] = parts[k];
+          const buf = k === 0 ? first : await director.audioRange(a, b);
+          if (!buf || !audioCtx || audioCtx.state === 'closed') return;
+          const src = audioCtx.createBufferSource();
+          src.buffer = buf;
+          src.connect(dest);
+          const when = at0 + a / fps;
+          const late = Math.max(0, audioCtx.currentTime - when);
+          src.start(when + late, late);
+          sources.push(src);
+        }
+      })().catch((err) => console.warn('clip audio', err));
+    }
     const n = director.count;
     for (;;) {
       if (signal?.aborted) throw new DOMException('Отменено', 'AbortError');
@@ -261,7 +347,9 @@ export async function exportRealtime(director, { onProgress, signal } = {}) {
     if (rec.state !== 'inactive') rec.stop();
     await stopped;
     stream.getTracks().forEach((t) => t.stop());
+    for (const src of sources) { try { src.stop(); } catch (_) { /* ended */ } }
     if (audioCtx) audioCtx.close();
+    audioCtx = null;
     director.finish();
   }
   onProgress?.(1);
@@ -290,41 +378,52 @@ export function downloadBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-/** API used by the headless renderer (cs2demo/recorder.py). */
+/** API used by the headless renderer (cs2demo/recorder.py). pov.js adds beginPov. */
 export function installRenderApi(viewer, getDemo) {
-  let director = null;
+  const wav64 = (buf) => {
+    if (!buf) return null;
+    const bytes = new Uint8Array(encodeWav(buf));
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  };
   const api = {
     ready: false,
     error: null,
+    director: null,
+    viewer,
+    getDemo,
+    /** Start a director (ClipDirector or PovDirector) at the window size. */
+    use(director) {
+      if (api.director) api.director.finish();
+      api.director = director;
+      director.start();
+      return { frames: director.count, parts: director.audioParts || [[0, director.count]] };
+    },
     begin(id, opts) {
       const demo = getDemo();
       const h = demo.highlights.find((x) => x.id === id);
       if (!h) throw new Error(`нет хайлайта ${id}`);
-      if (director) director.finish();
-      director = new ClipDirector(viewer, h, {
-        ...opts, width: window.innerWidth, height: window.innerHeight,
-      });
-      director.start();
-      return { frames: director.count };
+      return api.use(new ClipDirector(viewer, h, { ...opts, width: window.innerWidth, height: window.innerHeight }));
     },
     frames(a, b) {
       const out = [];
-      const q = director.opts.quality ?? 0.9;
-      for (let i = a; i < b; i++) out.push(director.render(i).toDataURL('image/jpeg', q));
+      const d = api.director;
+      const q = d.opts.quality ?? 0.9;
+      for (let i = a; i < b; i++) out.push(d.render(i).toDataURL('image/jpeg', q));
       return out;
     },
     /** The current clip's soundtrack as a base64 WAV (null when sound is off). */
     async audio() {
-      const buf = director ? await director.audio() : null;
-      if (!buf) return null;
-      const bytes = new Uint8Array(encodeWav(buf));
-      let bin = '';
-      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-      return btoa(bin);
+      return wav64(api.director ? await api.director.audio() : null);
+    },
+    /** Sound of frames [a, b) as a base64 WAV (null when sound is off). */
+    async audioRange(a, b) {
+      return wav64(api.director ? await api.director.audioRange(a, b) : null);
     },
     end() {
-      if (director) director.finish();
-      director = null;
+      if (api.director) api.director.finish();
+      api.director = null;
     },
   };
   window.cs2render = api;

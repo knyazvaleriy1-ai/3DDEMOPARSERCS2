@@ -605,7 +605,9 @@ export class LiveAudio {
   _voice(demo, prev, tick, playing, speed, opts) {
     const ctx = this.ctx;
     const track = demo.voice;
-    const on = ctx && ctx.state === 'running' && !this.muted && playing && speed >= 0.5 && speed <= 2
+    // steady: fast-forward after a POV death — speech keeps its normal speed.
+    const steady = !!opts?.steady;
+    const on = ctx && ctx.state === 'running' && !this.muted && playing && (steady || (speed >= 0.5 && speed <= 2))
       && opts && opts.mode && opts.mode !== 'off' && track.available;
     if (!on) {
       this.stopVoice();
@@ -615,7 +617,8 @@ export class LiveAudio {
       track.ready();
       return;
     }
-    const key = `${opts.mode}:${opts.focus}:${speed}`;
+    const rate = steady ? 1 : speed;
+    const key = `${opts.mode}:${opts.focus}:${rate}`;
     const jumped = prev === null || tick < prev || tick - prev > demo.tickRate || key !== this.voiceKey;
     if (jumped) {
       this.stopVoice();
@@ -626,11 +629,11 @@ export class LiveAudio {
     for (const s of list) {
       if (this.voiceSources.has(s) || !this._voiceAllow(s.player, s.tick)) continue;
       const pcm = track.pcm(s);
-      const offset = Math.max(0, (tick - s.tick) / demo.tickRate); // seconds already spoken
+      const offset = steady && !jumped ? 0 : Math.max(0, (tick - s.tick) / demo.tickRate); // seconds already spoken
       if (offset >= pcm.length / VOICE_SAMPLE_RATE - 0.02) continue;
       const src = ctx.createBufferSource();
       src.buffer = voiceBuffer(ctx, pcm);
-      src.playbackRate.value = speed;
+      src.playbackRate.value = rate;
       src.connect(this.voiceGain);
       src.onended = () => { if (this.voiceSources.get(s) === src) this.voiceSources.delete(s); };
       src.start(ctx.currentTime + 0.02, offset);
