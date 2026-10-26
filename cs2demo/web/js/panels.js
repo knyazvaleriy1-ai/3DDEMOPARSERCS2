@@ -446,9 +446,11 @@ export class ClipsPanel {
 Object.assign(ClipsPanel.prototype, {
   /** Static version: clips recorded in this browser (IndexedDB). */
   async _localClips(demoId) {
-    for (const u of this._urls || []) URL.revokeObjectURL(u);
-    this._urls = [];
     const clips = await library.listClips(!this.all && demoId ? demoId : null);
+    // Revoke the previous list's URLs once its <video>s have been replaced.
+    const old = this._urls || [];
+    setTimeout(() => old.forEach((u) => URL.revokeObjectURL(u)), 0);
+    this._urls = [];
     this._blobs = new Map();
     return clips.map((c) => {
       const url = URL.createObjectURL(c.blob);

@@ -1,0 +1,8 @@
+# Vercel only needs the web app, the package (map/model download helpers)
+# and the site build script.
+tests/
+wasm/
+docs/
+.github/
+start.bat
+start.sh
