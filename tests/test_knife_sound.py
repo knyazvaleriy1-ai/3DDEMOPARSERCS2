@@ -332,3 +332,26 @@ def test_render_smokes_validates_voice():
 
     with pytest.raises(ValueError):
         render_smokes("x", base_url="http://127.0.0.1:1", voice="loud")
+
+
+@needs_node
+def test_js_bomb_beeps_stop_with_the_round():
+    """All CTs dead after the plant: the round ends, the bomb never explodes and must
+    not beep on into later rounds (until some other bomb's explosion)."""
+    out = run_js("""
+    const A = await import('./cs2demo/web/js/audio.js');
+    const rate = 64, s = (x) => x * rate;
+    const demo = { tickRate: rate, startTick: 0, endTick: s(400), shots: [], hurts: [], effects: {}, grenades: [],
+      rounds: [{ start: 0, end: s(100), next: s(107) }, { start: s(107), end: s(200), next: s(207) }, { start: s(207), end: s(300), next: s(307) }],
+      bomb: [{ tick: s(80), type: 'plant', pos: [0, 0, 0] },                 // round 1: CTs die, no explosion
+             { tick: s(250), type: 'plant', pos: [0, 0, 0] }, { tick: s(291), type: 'explode' }],  // round 3: explodes
+      state: (p, t, out = {}) => Object.assign(out, { x: 0, y: 0, z: 0 }) };
+    const ev = A.collectEvents(demo, -1, s(400), -1, { footsteps: false });
+    const beeps = ev.filter((e) => e.name === 'bomb_beep').map((e) => e.tick / rate);
+    console.log(JSON.stringify({ timers: A.bombTimers(demo).map((c) => [c.plant / rate, c.end / rate, c.how]),
+      round2: beeps.filter((t) => t >= 107 && t < 207).length, last1: Math.max(...beeps.filter((t) => t < 107)),
+      names: [...new Set(ev.map((e) => e.name))].sort() }));
+    """)
+    assert out["timers"] == [[80, 107, None], [250, 291, "explode"]]
+    assert out["round2"] == 0 and out["last1"] < 107
+    assert out["names"] == ["bomb_beep", "bomb_planted", "c4_explode"]

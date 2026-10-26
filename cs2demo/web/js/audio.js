@@ -21,6 +21,7 @@ export const SOUND_NAMES = [
 ];
 
 const VARIANTS = 4; // takes of each synthesised sound
+const C4_TIMER = 40; // s from plant to explosion (mp_c4timer; the event comes ~1 s later)
 const VOICE_GAIN = 1.0;
 const DUCK = 0.5; // game level while someone talks
 
@@ -601,6 +602,36 @@ export function grenadeBounces(demo) {
 }
 
 /**
+ * Each planted bomb: {plant, end, how, pos}. It ticks until it is defused or
+ * explodes (``how``), or until the round is over without either: in CS2 the
+ * round ends at once when every CT is dead, and the bomb is gone with it.
+ */
+export function bombTimers(demo) {
+  if (demo._bombTimers) return demo._bombTimers;
+  const out = [];
+  const starts = (demo.rounds || []).map((r) => r.start);
+  const bomb = demo.bomb || [];
+  bomb.forEach((b, i) => {
+    if (b.type !== 'plant') return;
+    let end = Math.min(b.tick + (C4_TIMER + 3) * demo.tickRate, demo.endTick ?? Infinity);
+    const next = starts.find((s) => s > b.tick);
+    if (next !== undefined) end = Math.min(end, next);
+    let how = null;
+    for (let j = i + 1; j < bomb.length && bomb[j].tick <= end; j++) {
+      if (bomb[j].type === 'plant') { end = bomb[j].tick; break; }
+      if (bomb[j].type === 'defuse' || bomb[j].type === 'explode') {
+        end = bomb[j].tick;
+        how = bomb[j].type;
+        break;
+      }
+    }
+    out.push({ plant: b.tick, end, how, pos: b.pos });
+  });
+  demo._bombTimers = out;
+  return out;
+}
+
+/**
  * Sound events with tick in (t0, t1]. Each: {tick, name, pos:[x,y,z] (world) | null, gain, player, key}.
  * ``opts.footsteps === false`` leaves footsteps out (fast playback).
  */
@@ -650,23 +681,20 @@ export function collectEvents(demo, t0, t1, _listenerPlayer = -1, opts = {}) {
     const [tick, x, y, z] = bounces[i];
     out.push({ tick, name: 'bounce', pos: [x, y, z], gain: 1, key: i });
   }
-  // Bomb: plant, beeps speeding up over 40 s, defuse, explosion.
-  let plant = null;
-  for (const b of demo.bomb) {
-    if (b.type === 'plant') plant = b;
-    if (b.tick > t0 && b.tick <= t1) {
-      if (b.type === 'plant') out.push({ tick: b.tick, name: 'bomb_planted', pos: b.pos, gain: 1 });
-      if (b.type === 'defuse') out.push({ tick: b.tick, name: 'bomb_defused', pos: b.pos || plant?.pos, gain: 1 });
-      if (b.type === 'explode') out.push({ tick: b.tick, name: 'c4_explode', pos: plant?.pos || b.pos, gain: 1 });
+  // Bomb: plant, beeps speeding up while it ticks, defuse, explosion.
+  for (const c4 of bombTimers(demo)) {
+    if (c4.plant > t1) break;
+    if (c4.end <= t0) continue;
+    const { pos } = c4;
+    if (c4.plant > t0) out.push({ tick: c4.plant, name: 'bomb_planted', pos, gain: 1 });
+    if (c4.how && c4.end > t0 && c4.end <= t1) {
+      out.push({ tick: c4.end, name: c4.how === 'defuse' ? 'bomb_defused' : 'c4_explode', pos, gain: 1 });
     }
-    if (b.type === 'plant') {
-      const end = demo.bomb.find((e) => e.tick > b.tick && (e.type === 'defuse' || e.type === 'explode'))?.tick ?? b.tick + 40 * demo.tickRate;
-      let t = b.tick + demo.tickRate;
-      while (t < end && t <= t1) {
-        if (t > t0) out.push({ tick: t, name: 'bomb_beep', pos: b.pos, gain: 1 });
-        const elapsed = (t - b.tick) / demo.tickRate;
-        t += demo.tickRate * Math.max(0.12, 1 - elapsed / 42);
-      }
+    let t = c4.plant + demo.tickRate;
+    while (t < c4.end && t <= t1) {
+      if (t > t0) out.push({ tick: t, name: 'bomb_beep', pos, gain: 1 });
+      const elapsed = (t - c4.plant) / demo.tickRate;
+      t += demo.tickRate * Math.max(0.12, 1 - elapsed / 42);
     }
   }
   if (opts.footsteps !== false && soundPrefs.steps) {
